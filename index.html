@@ -152,6 +152,12 @@
         <button class="btn secondary small" id="originBtn" disabled>🎯 Set origin (0,0)</button>
         <span class="readout" id="scaleReadout">Scale: not set — distances in pixels</span>
       </div>
+      <div class="rowline" id="scaleEntry" style="margin-top:8px;display:none">
+        <span class="readout" id="scalePxLbl">Real distance between the two points:</span>
+        <label class="inline"><input type="number" id="scaleMeters" value="1.0" min="0" step="any"> m</label>
+        <button class="btn small" id="scaleApplyBtn">Set scale</button>
+        <button class="btn secondary small" id="scaleCancelBtn">Cancel</button>
+      </div>
     </div>
 
     <div class="card">
@@ -399,16 +405,28 @@ function crosshair(p,color,S){ dctx.strokeStyle=color; dctx.lineWidth=1.5*S;
   dctx.moveTo(p.x,p.y-9*S); dctx.lineTo(p.x,p.y+9*S); dctx.stroke(); }
 
 /* ---------- Calibration / origin ---------- */
-$('#scaleBtn').onclick=()=>{ pendingAction='cal1'; status('Click the FIRST point of your known distance.'); };
+$('#scaleBtn').onclick=()=>{ pendingAction='cal1'; $('#scaleEntry').style.display='none'; status('Click the FIRST point of your known distance.'); };
 $('#originBtn').onclick=()=>{ pendingAction='origin'; status('Click where distance = 0 (the origin).'); };
+// After both points are picked, reveal an inline field (iPad Safari blocks prompt() from touch handlers).
 function finishCalibration(){
   const px=Math.hypot(calLine.p2.x-calLine.p1.x, calLine.p2.y-calLine.p1.y);
-  const m=parseFloat(prompt('Real distance between the two points, in metres:','1.0'));
-  if(!m||m<=0||!px){ calLine=null; status('Scale canceled.'); render(); return; }
+  $('#scalePxLbl').textContent='Line = '+px.toFixed(0)+' px. Real distance between the two points:';
+  $('#scaleEntry').style.display='flex';
+  const inp=$('#scaleMeters'); try{ inp.focus(); inp.select(); }catch(_){}
+  status('Type the real distance and tap “Set scale”.');
+}
+$('#scaleApplyBtn').onclick=()=>{
+  if(!calLine){ $('#scaleEntry').style.display='none'; return; }
+  const px=Math.hypot(calLine.p2.x-calLine.p1.x, calLine.p2.y-calLine.p1.y);
+  const m=parseFloat($('#scaleMeters').value);
+  if(!(m>0)||!(px>0)){ status('Enter a positive distance in metres.'); try{$('#scaleMeters').focus();}catch(_){} return; }
   calLine.meters=m; scaleMPP=m/px;
   $('#scaleReadout').textContent='Scale: '+scaleMPP.toFixed(4)+' m/px  ('+m+' m over '+px.toFixed(0)+' px)';
-  status('Scale set. Now track your object.'); render(); updateGraph();
-}
+  $('#scaleEntry').style.display='none';
+  status('Scale set — distances now in metres.'); if(loaded) render(); updateGraph(); updateSelUI();
+};
+$('#scaleCancelBtn').onclick=()=>{ calLine=null; $('#scaleEntry').style.display='none'; status('Scale entry canceled.'); if(loaded) render(); };
+$('#scaleMeters').addEventListener('keydown', e=>{ if(e.key==='Enter') $('#scaleApplyBtn').click(); });
 
 /* ---------- Tracks ---------- */
 function addTrack(){
