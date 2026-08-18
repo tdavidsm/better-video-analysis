@@ -84,6 +84,11 @@
   th,td{text-align:left;padding:4px 7px;border-bottom:1px solid var(--line)}
   th{color:var(--muted);position:sticky;top:0;background:var(--panel)}
   td .sw{display:inline-block;width:10px;height:10px;border-radius:50%;vertical-align:middle;margin-right:5px}
+  #dataBody tr{cursor:pointer}
+  #dataBody tr:hover{background:#1d2b52}
+  tr.selrow{background:#2a4488}
+  tr.selrow:hover{background:#33509c}
+  #selInfo b{color:var(--accent)}
   .empty{color:var(--muted);font-size:13px;padding:4px 2px}
 
   .modal{position:fixed;inset:0;background:#0008;display:none;align-items:center;justify-content:center;z-index:20;padding:20px}
@@ -156,6 +161,7 @@
         <div class="modes">
           <div class="chip sel" id="modeManual">✋ Manual tap</div>
           <div class="chip" id="modeAuto">🤖 Auto (OpenCV)</div>
+          <div class="chip" id="modeEdit">✏️ Edit / select</div>
         </div>
       </div>
       <div class="rowline" style="margin-top:10px">
@@ -170,6 +176,9 @@
         <button class="btn small" id="trackRunBtn" disabled>▶ Track to end</button>
         <button class="btn secondary small" id="trackStopBtn" disabled>■ Stop</button>
         <span class="readout" id="autoStatus">Click the object once to lock the target, then “Track to end”.</span>
+      </div>
+      <div class="rowline" id="editHelp" style="margin-top:10px;display:none">
+        <span class="readout">Tap a tracked point on the video to select it. On the graph, tap a point or drag across a range. Selected points glow everywhere — use the panel on the right to read slopes, integrate, or delete.</span>
       </div>
       <div class="rowline" style="margin-top:10px">
         <button class="btn secondary small" id="clearTrackBtn">Clear this object’s points</button>
@@ -197,6 +206,14 @@
         <button class="btn secondary small" id="exportBtn">⬇ CSV</button>
       </div>
     </div>
+    <div class="card">
+      <h2>Selection &amp; analysis</h2>
+      <div class="rowline"><span class="readout" id="selInfo">Tap a point (graph, table, or video in Edit mode) to select it. Drag across the graph to select a time range.</span></div>
+      <div class="rowline" style="margin-top:8px">
+        <button class="btn secondary small" id="delSelBtn" disabled>🗑 Delete selected</button>
+        <button class="btn secondary small" id="clearSelBtn" disabled>✖ Clear selection</button>
+      </div>
+    </div>
     <div class="card"><h2>Objects</h2><div class="legend" id="legend"></div></div>
     <div class="card tablecard">
       <h2>Data — selected object</h2>
@@ -221,6 +238,7 @@
         </ul>
       </li>
       <li>Add more <b>objects</b> to compare several movers, each its own color. Read the <b>distance–time graph</b>, add a <b>best-fit line</b>, and export <b>CSV</b>.</li>
+      <li><b>Select &amp; analyze:</b> tap a point on the graph, table, or (in ✏️ Edit mode) the video — it highlights in all three, and the graph shows its coordinates and <b>slope</b> (a tangent line). Drag across the graph to select a <b>range</b>: the panel shows the range’s <b>best-fit slope</b> and <b>integral</b>, and the best-fit line is limited to that range. <b>Delete selected</b> removes bad points.</li>
     </ol>
     <p style="color:var(--muted)"><b>Tip:</b> a straight distance–time line means constant speed (slope = speed); a curve means acceleration.</p>
     <button class="btn" id="closeHelp">Got it</button>
@@ -272,6 +290,9 @@ let origin=null;            // {x,y} image coords
 let mode='manual';
 let pendingAction=null;    // 'cal1'|'cal2'|'origin'|'target'
 let templateMat=null, lastPos=null, autoStop=false, tracking=false;
+let selected=new Set();      // selected point frames (active track)
+let gview=null;              // last graph transform, for hit-testing
+let brush=null, gDown=null;  // graph drag/brush state
 
 /* ---------- File load ---------- */
 $('#uploadBtn').onclick=()=>$('#fileInput').click();
@@ -356,7 +377,9 @@ function render(){
     if(pts.length>1){ dctx.strokeStyle=tk.color; dctx.lineWidth=2*S; dctx.globalAlpha=.75;
       dctx.beginPath(); pts.forEach((p,j)=>{ j?dctx.lineTo(p.x,p.y):dctx.moveTo(p.x,p.y); }); dctx.stroke(); dctx.globalAlpha=1; }
     const cf=curFrame();
-    tk.points.forEach(p=>{ dot(p,tk.color, (p.frame===cf?4.5:3)*S, i===activeTrack); });
+    tk.points.forEach(p=>{ dot(p,tk.color, (p.frame===cf?4.5:3)*S, i===activeTrack);
+      if(i===activeTrack && selected.has(p.frame)){ dctx.beginPath(); dctx.arc(p.x,p.y,6.5*S,0,7);
+        dctx.strokeStyle='#ffd166'; dctx.lineWidth=2*S; dctx.stroke(); } });
   });
   // template box (auto)
   if(mode==='auto' && lastPos && templateMat){
@@ -391,7 +414,7 @@ function finishCalibration(){
 function addTrack(){
   const color=PALETTE[tracks.length%PALETTE.length];
   tracks.push({id:Date.now()+Math.random(), name:'Object '+(tracks.length+1), color, points:[]});
-  activeTrack=tracks.length-1; renderTracks(); renderLegend(); updateGraph();
+  activeTrack=tracks.length-1; selected.clear(); renderTracks(); renderLegend(); updateGraph(); updateSelUI();
 }
 $('#addTrackBtn').onclick=addTrack;
 function renderTracks(){
@@ -399,26 +422,30 @@ function renderTracks(){
   tracks.forEach((tk,i)=>{
     const el=document.createElement('div'); el.className='trackchip'+(i===activeTrack?' sel':'');
     el.innerHTML=`<span class="sw" style="background:${tk.color}"></span><span class="n">${tk.name}</span><span class="cnt">(${tk.points.length})</span>`;
-    el.onclick=()=>{ activeTrack=i; resetTemplate(); renderTracks(); renderLegend(); updateGraph(); render(); };
+    el.onclick=()=>{ activeTrack=i; selected.clear(); resetTemplate(); renderTracks(); renderLegend(); updateGraph(); if(loaded)render(); updateSelUI(); };
     c.appendChild(el);
   });
 }
-$('#clearTrackBtn').onclick=()=>{ if(!tracks[activeTrack])return; if(confirm('Clear all points for '+tracks[activeTrack].name+'?')){ tracks[activeTrack].points=[]; resetTemplate(); afterData(); } };
-$('#delTrackBtn').onclick=()=>{ if(tracks.length<=1){ tracks[0].points=[]; resetTemplate(); afterData(); return; }
+$('#clearTrackBtn').onclick=()=>{ if(!tracks[activeTrack])return; if(confirm('Clear all points for '+tracks[activeTrack].name+'?')){ tracks[activeTrack].points=[]; selected.clear(); resetTemplate(); afterData(); } };
+$('#delTrackBtn').onclick=()=>{ selected.clear();
+  if(tracks.length<=1){ tracks[0].points=[]; resetTemplate(); afterData(); return; }
   if(confirm('Delete '+tracks[activeTrack].name+'?')){ tracks.splice(activeTrack,1); activeTrack=0; resetTemplate(); afterData(); } };
-function afterData(){ renderTracks(); renderLegend(); updateGraph(); render(); }
+function afterData(){ renderTracks(); renderLegend(); updateGraph(); if(loaded)render(); updateSelUI(); }
 
 /* ---------- Mode ---------- */
 $('#modeManual').onclick=()=>setMode('manual');
 $('#modeAuto').onclick=()=>setMode('auto');
+$('#modeEdit').onclick=()=>setMode('edit');
 function setMode(m){
   mode=m;
   $('#modeManual').classList.toggle('sel',m==='manual');
   $('#modeAuto').classList.toggle('sel',m==='auto');
+  $('#modeEdit').classList.toggle('sel',m==='edit');
   $('#manualHelp').style.display=m==='manual'?'flex':'none';
   $('#autoHelp').style.display=m==='auto'?'flex':'none';
+  $('#editHelp').style.display=m==='edit'?'flex':'none';
   if(m==='auto' && !cvReady) status('OpenCV isn’t ready — Manual tap still works. '+$('#cvBadge').textContent);
-  resetTemplate(); render();
+  resetTemplate(); if(loaded) render();
 }
 
 /* ---------- Point recording ---------- */
@@ -438,6 +465,7 @@ disp.addEventListener('pointerdown', e=>{
   if(pendingAction==='cal1'){ calLine={p1:p,p2:p}; pendingAction='cal2'; status('Click the SECOND point.'); render(); return; }
   if(pendingAction==='cal2'){ calLine.p2=p; pendingAction=null; finishCalibration(); return; }
   if(pendingAction==='origin'){ origin=p; pendingAction=null; status('Origin set.'); render(); updateGraph(); return; }
+  if(mode==='edit'){ const f=hitTestVideo(p); if(f!=null){ toggleSel(f); selectionChanged(); } return; }
   if(mode==='manual'){
     recordPoint(p); renderTracks(); renderLegend(); updateGraph();
     gotoFrame(curFrame()+1);                 // auto-advance
@@ -520,7 +548,7 @@ function valueOf(tk,p){                     // returns plotted y in current unit
   if(sel==='y') return (p.y-o.y)*k;
   return Math.hypot(p.x-o.x,p.y-o.y)*k;
 }
-function seriesFor(tk){ return tk.points.slice().sort((a,b)=>a.t-b.t).map(p=>({t:p.t,v:valueOf(tk,p)})); }
+function seriesFor(tk){ return tk.points.slice().sort((a,b)=>a.t-b.t).map(p=>({t:p.t,v:valueOf(tk,p),frame:p.frame})); }
 function linFit(pts){ const n=pts.length; let sx=0,sy=0,sxx=0,sxy=0;
   pts.forEach(p=>{sx+=p.t;sy+=p.v;sxx+=p.t*p.t;sxy+=p.t*p.v;});
   const den=n*sxx-sx*sx; if(Math.abs(den)<1e-9)return null;
@@ -547,6 +575,7 @@ function drawGraph(){
   const yTop=AV, yBot=negative?-AV:0;
   const X=t=>padL+(t/tmax)*plotW;
   const Y=v=>padT+plotH-((v-yBot)/(yTop-yBot))*plotH;
+  gview={padL,padT,plotW,plotH,tmax,yTop,yBot};
 
   gctx.strokeStyle='#2c3d6b'; gctx.fillStyle='#9fb0d6'; gctx.font='11px -apple-system,sans-serif';
   gctx.textAlign='center'; gctx.textBaseline='top';
@@ -572,19 +601,60 @@ function drawGraph(){
     s.forEach(p=>{ gctx.beginPath(); gctx.arc(X(p.t),Y(p.v),4.5,0,7); gctx.fillStyle=tk.color; gctx.fill();
       gctx.lineWidth=1.5; gctx.strokeStyle='#0f1830'; gctx.stroke(); });
   });
-  // best-fit for active track
+
+  // ---- selection overlays (active track) ----
+  const selS=selectedSeries();
+  if(selS.length>=2){                                  // shade the integral area
+    gctx.save(); gctx.beginPath(); gctx.rect(padL,padT,plotW,plotH); gctx.clip();
+    gctx.fillStyle=(tracks[activeTrack]&&tracks[activeTrack].color)||'#ffd166'; gctx.globalAlpha=.15;
+    const base=Y(Math.max(yBot,0));
+    gctx.beginPath(); gctx.moveTo(X(selS[0].t),base);
+    selS.forEach(p=>gctx.lineTo(X(p.t),Y(p.v)));
+    gctx.lineTo(X(selS[selS.length-1].t),base); gctx.closePath(); gctx.fill();
+    gctx.globalAlpha=1; gctx.restore();
+  }
+  selS.forEach(p=>{ gctx.beginPath(); gctx.arc(X(p.t),Y(p.v),7,0,7);
+    gctx.strokeStyle='#ffd166'; gctx.lineWidth=2.5; gctx.stroke(); });
+  if(selected.size===1){                               // single point: tangent + coordinate tag
+    const fr=[...selected][0], p=selS[0]||activeSeries().find(q=>q.frame===fr);
+    if(p){
+      const sl=slopeAtFrame(fr);
+      if(sl!=null){ gctx.save(); gctx.beginPath(); gctx.rect(padL,padT,plotW,plotH); gctx.clip();
+        const dtp=Math.max(tmax*0.10,1e-6);
+        gctx.strokeStyle='#ffffff'; gctx.lineWidth=1.5; gctx.setLineDash([5,4]);
+        gctx.beginPath(); gctx.moveTo(X(p.t-dtp),Y(p.v-sl*dtp)); gctx.lineTo(X(p.t+dtp),Y(p.v+sl*dtp)); gctx.stroke();
+        gctx.setLineDash([]); gctx.restore(); }
+      const lbl=`(${p.t.toFixed(3)} s, ${p.v.toFixed(3)} ${unit()})`;
+      gctx.font='bold 12px -apple-system,sans-serif'; gctx.textAlign='left'; gctx.textBaseline='middle';
+      const tw=gctx.measureText(lbl).width;
+      let lx=X(p.t)+12, ly=Y(p.v)-14;
+      if(lx+tw+10>padL+plotW) lx=X(p.t)-tw-14;
+      ly=clamp(ly,padT+11,padT+plotH-11);
+      gctx.fillStyle='rgba(12,20,40,.9)'; gctx.fillRect(lx-6,ly-10,tw+12,20);
+      gctx.strokeStyle='#ffd166'; gctx.lineWidth=1.2; gctx.strokeRect(lx-6,ly-10,tw+12,20);
+      gctx.fillStyle='#eaf0ff'; gctx.fillText(lbl,lx,ly);
+    }
+  }
+  if(brush){                                           // live brush band
+    gctx.fillStyle='rgba(255,209,102,.15)'; gctx.fillRect(brush.x0,padT,brush.x1-brush.x0,plotH);
+    gctx.strokeStyle='rgba(255,209,102,.6)'; gctx.lineWidth=1; gctx.strokeRect(brush.x0,padT,brush.x1-brush.x0,plotH);
+  }
+
+  // best-fit for active track (range-limited when a range is selected)
   if(fitShown && tracks[activeTrack]){
-    const s=seriesFor(tracks[activeTrack]);
+    const useSel=selS.length>=2;
+    const s=useSel?selS:seriesFor(tracks[activeTrack]);
     if(s.length>=2){ const f=linFit(s);
       if(f){ const col=tracks[activeTrack].color;
+        const ta=useSel?s[0].t:0, tb=useSel?s[s.length-1].t:tmax;
         gctx.save(); gctx.beginPath(); gctx.rect(padL,padT,plotW,plotH); gctx.clip();
         gctx.strokeStyle=col; gctx.lineWidth=2.5; gctx.setLineDash([7,5]);
-        gctx.beginPath(); gctx.moveTo(X(0),Y(f.b)); gctx.lineTo(X(tmax),Y(f.m*tmax+f.b)); gctx.stroke();
+        gctx.beginPath(); gctx.moveTo(X(ta),Y(f.m*ta+f.b)); gctx.lineTo(X(tb),Y(f.m*tb+f.b)); gctx.stroke();
         gctx.setLineDash([]); gctx.restore();
         const sign=f.b>=0?'+':'−';
-        const label=`${yl.toLowerCase()} = ${f.m.toFixed(3)}·t ${sign} ${Math.abs(f.b).toFixed(3)}  (slope ${f.m.toFixed(3)} ${unit()}/s)`;
+        const label=`${yl.toLowerCase()} = ${f.m.toFixed(3)}·t ${sign} ${Math.abs(f.b).toFixed(3)}  (slope ${f.m.toFixed(3)} ${unit()}/s)${useSel?' · range':''}`;
         gctx.font='bold 12px -apple-system,sans-serif'; gctx.textAlign='left'; gctx.textBaseline='middle';
-        const tw=gctx.measureText(label).width; let lx=padL+10, ly=padT+14;
+        const tw=gctx.measureText(label).width; let lx=padL+10, ly=padT+plotH-12;
         gctx.fillStyle='rgba(12,20,40,.88)'; gctx.fillRect(lx-6,ly-10,tw+12,20);
         gctx.strokeStyle=col; gctx.lineWidth=1.5; gctx.strokeRect(lx-6,ly-10,tw+12,20);
         gctx.fillStyle=col; gctx.fillText(label,lx,ly);
@@ -593,6 +663,66 @@ function drawGraph(){
   }
 }
 window.addEventListener('resize', ()=>{ drawGraph(); if(loaded) render(); });
+
+/* ---------- Selection & analysis ---------- */
+function activeTk(){ return tracks[activeTrack]; }
+function activeSeries(){ const tk=activeTk(); return tk?seriesFor(tk):[]; }        // sorted by t, has frame
+function selectedSeries(){ return activeSeries().filter(p=>selected.has(p.frame)); }
+function toggleSel(frame){ if(selected.has(frame)) selected.delete(frame); else selected.add(frame); }
+function clearSelection(){ selected.clear(); selectionChanged(); }
+function selectionChanged(){ drawGraph(); if(loaded) render(); renderData(); updateSelUI(); }
+function deleteSelected(){ const tk=activeTk(); if(!tk||!selected.size) return;
+  tk.points=tk.points.filter(p=>!selected.has(p.frame)); selected.clear();
+  renderTracks(); renderLegend(); updateGraph(); if(loaded) render(); updateSelUI(); }
+function slopeAtFrame(frame){ const s=activeSeries(); if(s.length<2) return null;
+  const i=s.findIndex(p=>p.frame===frame); if(i<0) return null;
+  const a=i===0?s[0]:s[i-1], b=i===s.length-1?s[i]:s[i+1];
+  const dt=b.t-a.t; return Math.abs(dt)<1e-9?null:(b.v-a.v)/dt; }                  // central difference
+function integralOfSelection(){ const s=selectedSeries(); if(s.length<2) return null;
+  let area=0; for(let i=0;i<s.length-1;i++) area+=0.5*(s[i].v+s[i+1].v)*(s[i+1].t-s[i].t);  // trapezoid
+  return {area, t0:s[0].t, t1:s[s.length-1].t}; }
+
+function gXt(t){ return gview.padL+(t/gview.tmax)*gview.plotW; }
+function gYv(v){ return gview.padT+gview.plotH-((v-gview.yBot)/(gview.yTop-gview.yBot))*gview.plotH; }
+function gInvT(px){ if(!gview) return 0; return clamp((px-gview.padL)/gview.plotW*gview.tmax,0,gview.tmax); }
+function hitTestGraph(x,y){ if(!gview) return null; let best=null,bd=15*15;
+  activeSeries().forEach(p=>{ const dx=x-gXt(p.t),dy=y-gYv(p.v),d=dx*dx+dy*dy; if(d<bd){bd=d;best=p.frame;} });
+  return best; }
+function hitTestVideo(pt){ const tk=activeTk(); if(!tk) return null; const tol=Math.max(12,vw*0.03); let best=null,bd=tol*tol;
+  tk.points.forEach(q=>{ const dx=pt.x-q.x,dy=pt.y-q.y,d=dx*dx+dy*dy; if(d<bd){bd=d;best=q.frame;} });
+  return best; }
+
+gcanvas.addEventListener('pointerdown',e=>{ if(!gview) return; const r=gcanvas.getBoundingClientRect();
+  gDown={x:e.clientX-r.left,y:e.clientY-r.top,moved:false}; try{gcanvas.setPointerCapture(e.pointerId);}catch(_){} });
+gcanvas.addEventListener('pointermove',e=>{ if(!gDown) return; const r=gcanvas.getBoundingClientRect();
+  const x=e.clientX-r.left; if(Math.abs(x-gDown.x)>5){ gDown.moved=true; brush={x0:Math.min(gDown.x,x),x1:Math.max(gDown.x,x)}; drawGraph(); } });
+gcanvas.addEventListener('pointerup',e=>{ if(!gDown) return; const r=gcanvas.getBoundingClientRect();
+  const x=e.clientX-r.left, y=e.clientY-r.top;
+  if(gDown.moved && brush){ const t0=gInvT(brush.x0),t1=gInvT(brush.x1); selected.clear();
+    activeSeries().forEach(p=>{ if(p.t>=t0&&p.t<=t1) selected.add(p.frame); }); brush=null; }
+  else { const f=hitTestGraph(x,y); if(f!=null) toggleSel(f); }
+  gDown=null; selectionChanged(); });
+
+$('#delSelBtn').onclick=deleteSelected;
+$('#clearSelBtn').onclick=clearSelection;
+
+function updateSelUI(){
+  const n=selected.size, u=unit();
+  $('#delSelBtn').disabled=n===0; $('#clearSelBtn').disabled=n===0;
+  const yl=$('#plotSel').value==='x'?'x':$('#plotSel').value==='y'?'y':'dist';
+  if(n===0){ $('#selInfo').innerHTML='Tap a point (graph, table, or video in Edit mode) to select it. Drag across the graph to select a time range.'; return; }
+  if(n===1){ const fr=[...selected][0], tk=activeTk(), p=tk&&tk.points.find(q=>q.frame===fr);
+    if(!p){ $('#selInfo').textContent='Selected point is no longer present.'; return; }
+    const v=valueOf(tk,p), sl=slopeAtFrame(fr);
+    $('#selInfo').innerHTML=`<b>Point</b> · frame ${fr} · t=${p.t.toFixed(3)} s · ${yl}=${v.toFixed(3)} ${u} · pixel (${p.x.toFixed(0)}, ${p.y.toFixed(0)})`+
+      (sl!=null?` · slope≈<b>${sl.toFixed(3)} ${u}/s</b>`:'');
+    return; }
+  const s=selectedSeries(), fit=linFit(s), ig=integralOfSelection();
+  let msg=`<b>Range</b> · ${n} pts · Δt=${(s[s.length-1].t-s[0].t).toFixed(3)} s`;
+  if(fit) msg+=` · best-fit slope=<b>${fit.m.toFixed(3)} ${u}/s</b>`;
+  if(ig)  msg+=` · ∫(${yl})dt=<b>${ig.area.toFixed(3)} ${u}·s</b>`;
+  $('#selInfo').innerHTML=msg;
+}
 
 /* ---------- Legend + data table ---------- */
 function renderLegend(){ const c=$('#legend'); c.innerHTML='';
@@ -605,7 +735,9 @@ function renderData(){
   const s=(tk?tk.points:[]).slice().sort((a,b)=>a.frame-b.frame);
   $('#emptyMsg').style.display=s.length?'none':'block';
   s.forEach(p=>{ const tr=document.createElement('tr');
+    if(selected.has(p.frame)) tr.className='selrow';
     tr.innerHTML=`<td>${p.frame}</td><td>${p.t.toFixed(3)}</td><td>${p.x.toFixed(0)}</td><td>${p.y.toFixed(0)}</td><td>${valueOf(tk,p).toFixed(3)}</td>`;
+    tr.onclick=()=>{ toggleSel(p.frame); selectionChanged(); };
     tb.appendChild(tr); });
 }
 
@@ -626,7 +758,7 @@ $('#helpBtn').onclick=()=>$('#helpModal').classList.add('show');
 $('#closeHelp').onclick=()=>$('#helpModal').classList.remove('show');
 $('#helpModal').onclick=e=>{ if(e.target.id==='helpModal') $('#helpModal').classList.remove('show'); };
 
-renderTracks(); renderLegend(); renderData(); drawGraph();
+renderTracks(); renderLegend(); renderData(); drawGraph(); updateSelUI();
 </script>
 </body>
 </html>
