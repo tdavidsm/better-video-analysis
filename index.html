@@ -36,6 +36,7 @@
   .btn.secondary{background:var(--panel2);color:var(--ink);border:1px solid var(--line)}
   .btn.secondary.active{background:var(--accent);color:#0f1830;border-color:var(--accent)}
   .btn:disabled{opacity:.4;cursor:not-allowed}
+  .btn.danger,.btn.secondary.danger{background:#e6294b;color:#fff;border-color:#e6294b}
   .btn.small{padding:6px 11px;font-size:13px}
 
   /* video / canvas */
@@ -444,10 +445,23 @@ function renderTracks(){
     c.appendChild(el);
   });
 }
-$('#clearTrackBtn').onclick=()=>{ if(!tracks[activeTrack])return; if(confirm('Clear all points for '+tracks[activeTrack].name+'?')){ tracks[activeTrack].points=[]; selected.clear(); resetTemplate(); afterData(); } };
-$('#delTrackBtn').onclick=()=>{ selected.clear();
+// Two-tap inline confirm — no popup (iOS Safari can block confirm() from touch handlers).
+function armConfirm(btn, action){
+  if(btn.dataset.armed==='1'){
+    clearTimeout(+btn.dataset.timer); btn.dataset.armed='0';
+    btn.textContent=btn.dataset.label; btn.classList.remove('danger');
+    action(); return;
+  }
+  if(!btn.dataset.label) btn.dataset.label=btn.textContent;
+  btn.dataset.armed='1'; btn.textContent='Tap again to confirm'; btn.classList.add('danger');
+  btn.dataset.timer=setTimeout(()=>{ btn.dataset.armed='0'; btn.textContent=btn.dataset.label; btn.classList.remove('danger'); }, 3000);
+}
+$('#clearTrackBtn').onclick=()=>{ if(!tracks[activeTrack])return; armConfirm($('#clearTrackBtn'), ()=>{
+  tracks[activeTrack].points=[]; selected.clear(); resetTemplate(); afterData(); }); };
+$('#delTrackBtn').onclick=()=>{ armConfirm($('#delTrackBtn'), ()=>{
+  selected.clear();
   if(tracks.length<=1){ tracks[0].points=[]; resetTemplate(); afterData(); return; }
-  if(confirm('Delete '+tracks[activeTrack].name+'?')){ tracks.splice(activeTrack,1); activeTrack=0; resetTemplate(); afterData(); } };
+  tracks.splice(activeTrack,1); activeTrack=0; resetTemplate(); afterData(); }); };
 function afterData(){ renderTracks(); renderLegend(); updateGraph(); if(loaded)render(); updateSelUI(); }
 
 /* ---------- Mode ---------- */
@@ -764,7 +778,7 @@ $('#exportBtn').onclick=()=>{
   let rows=[['object','frame','time_s','x_px','y_px','value_'+unit(),'plot_'+$('#plotSel').value]];
   tracks.forEach(tk=>tk.points.slice().sort((a,b)=>a.frame-b.frame).forEach(p=>{
     rows.push([tk.name,p.frame,p.t.toFixed(4),p.x.toFixed(1),p.y.toFixed(1),valueOf(tk,p).toFixed(4),$('#plotSel').value]); }));
-  if(rows.length<2){ alert('No data to export yet.'); return; }
+  if(rows.length<2){ status('No data to export yet.'); return; }
   const csv=rows.map(r=>r.join(',')).join('\n');
   const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
   a.download='video-analysis-data.csv'; a.click(); URL.revokeObjectURL(a.href);
