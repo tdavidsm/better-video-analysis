@@ -1,0 +1,632 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Better Video Analysis — Motion from Real Video</title>
+<style>
+  :root{
+    --bg:#0f1830; --panel:#16213e; --panel2:#1d2b52; --ink:#eaf0ff;
+    --muted:#9fb0d6; --line:#2c3d6b; --accent:#ffd166;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;overflow:hidden}
+  header{display:flex;align-items:center;gap:12px;padding:10px 18px;
+    background:linear-gradient(180deg,#1a2748,#131f3c);border-bottom:1px solid var(--line)}
+  header h1{font-size:18px;margin:0;letter-spacing:.3px}
+  header .tag{font-size:12px;color:var(--muted)}
+  header .spacer{flex:1}
+  header .status{font-size:12px;color:var(--muted);max-width:340px;text-align:right}
+  .helpbtn{background:var(--panel2);color:var(--ink);border:1px solid var(--line);
+    border-radius:8px;padding:6px 12px;font-size:13px;cursor:pointer}
+  .helpbtn:hover{border-color:var(--accent)}
+
+  main{display:flex;height:calc(100% - 49px)}
+  .pane{padding:14px 16px;overflow:auto}
+  .left{flex:1.15;min-width:0;border-right:1px solid var(--line);display:flex;flex-direction:column;gap:12px}
+  .right{flex:1;min-width:0;display:flex;flex-direction:column;gap:10px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px 14px}
+  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin:0 0 8px}
+
+  .btn{border:none;border-radius:10px;padding:9px 16px;font-size:14px;font-weight:700;cursor:pointer;color:#0f1830;background:var(--accent)}
+  .btn:hover{filter:brightness(1.05)}
+  .btn.secondary{background:var(--panel2);color:var(--ink);border:1px solid var(--line)}
+  .btn.secondary.active{background:var(--accent);color:#0f1830;border-color:var(--accent)}
+  .btn:disabled{opacity:.4;cursor:not-allowed}
+  .btn.small{padding:6px 11px;font-size:13px}
+
+  /* video / canvas */
+  .stage{position:relative;background:#0a1020;border:1px solid var(--line);border-radius:12px;
+    min-height:180px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  #disp{max-width:100%;max-height:56vh;display:none;touch-action:none;cursor:crosshair}
+  .drop{color:var(--muted);text-align:center;padding:30px 20px;font-size:14px}
+  .drop b{color:var(--ink)}
+
+  .rowline{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .rowline.tight{gap:6px}
+  .scrub{flex:1;min-width:120px}
+  .readout{font-variant-numeric:tabular-nums;font-size:13px;color:var(--muted)}
+  .readout b{color:var(--accent)}
+  input[type="number"]{width:58px;background:#0c1428;border:1px solid var(--line);color:var(--ink);
+    border-radius:7px;padding:5px 7px;font-size:13px}
+  label.inline{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:6px}
+
+  .modes{display:flex;gap:8px}
+  .chip{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:7px 12px;
+    font-size:13px;cursor:pointer;color:var(--muted)}
+  .chip.sel{border-color:var(--accent);color:var(--ink);background:#20315c;font-weight:600}
+
+  .tracks{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  .trackchip{display:flex;align-items:center;gap:7px;background:var(--panel2);border:2px solid transparent;
+    border-radius:10px;padding:6px 10px;cursor:pointer;font-size:13px}
+  .trackchip.sel{border-color:var(--accent)}
+  .trackchip .sw{width:13px;height:13px;border-radius:50%}
+  .trackchip .n{color:var(--muted)}
+  .trackchip.sel .n{color:var(--ink);font-weight:600}
+  .trackchip .cnt{color:var(--muted);font-size:11px}
+
+  /* graph */
+  .graphcard{flex:1;display:flex;flex-direction:column;min-height:0}
+  .canvaswrap{flex:1;position:relative;min-height:220px}
+  #graph{position:absolute;inset:0;width:100%;height:100%}
+  .toolrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px}
+  .toolrow .spacer{flex:1}
+  .toolrow label{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:6px;cursor:pointer}
+  select{background:#0c1428;border:1px solid var(--line);color:var(--ink);border-radius:7px;padding:5px 8px;font-size:13px}
+  .legend{display:flex;flex-wrap:wrap;gap:6px 14px}
+  .legend .item{display:flex;align-items:center;gap:7px;font-size:13px}
+  .legend .sw{width:13px;height:13px;border-radius:50%}
+  .tablecard{max-height:150px;overflow:auto}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th,td{text-align:left;padding:4px 7px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);position:sticky;top:0;background:var(--panel)}
+  td .sw{display:inline-block;width:10px;height:10px;border-radius:50%;vertical-align:middle;margin-right:5px}
+  .empty{color:var(--muted);font-size:13px;padding:4px 2px}
+
+  .modal{position:fixed;inset:0;background:#0008;display:none;align-items:center;justify-content:center;z-index:20;padding:20px}
+  .modal.show{display:flex}
+  .modalbox{background:var(--panel);border:1px solid var(--line);border-radius:16px;max-width:600px;padding:22px 24px;line-height:1.55;max-height:86vh;overflow:auto}
+  .modalbox h2{margin-top:0}
+  .modalbox ol{padding-left:20px}.modalbox li{margin:6px 0}
+  .badge{display:inline-block;font-size:11px;padding:2px 8px;border-radius:20px;background:var(--panel2);border:1px solid var(--line);color:var(--muted)}
+  .badge.ok{color:#2fbf57;border-color:#2fbf5766}
+  .badge.warn{color:#ffb037;border-color:#ffb03766}
+
+  @media (max-width:900px){
+    main{flex-direction:column;height:auto;overflow:auto}body{overflow:auto}
+    .left{border-right:none;border-bottom:1px solid var(--line)}
+    #disp{max-height:70vh}.canvaswrap{min-height:300px}
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎬 Better Video Analysis</h1>
+  <span class="tag">Track real motion, frame by frame</span>
+  <span class="spacer"></span>
+  <span class="status" id="status">Upload a video to begin.</span>
+  <span class="badge" id="cvBadge">OpenCV: loading…</span>
+  <button class="helpbtn" id="helpBtn">?&nbsp;How&nbsp;to</button>
+</header>
+
+<main>
+  <!-- LEFT: video + tracking -->
+  <section class="pane left">
+    <div class="card">
+      <h2>1 · Load a video</h2>
+      <div class="rowline">
+        <button class="btn" id="uploadBtn">📁 Choose video…</button>
+        <input type="file" id="fileInput" accept="video/*" style="display:none">
+        <span class="readout" id="fileName">No file loaded</span>
+      </div>
+      <div class="stage" style="margin-top:10px">
+        <div class="drop" id="dropMsg"><b>Drop a video here</b><br>or use “Choose video…”. Everything runs in your browser — nothing is uploaded.</div>
+        <canvas id="disp"></canvas>
+      </div>
+      <div class="rowline" style="margin-top:10px">
+        <button class="btn secondary small" id="firstBtn" disabled>⏮</button>
+        <button class="btn secondary small" id="prevBtn" disabled>◀ frame</button>
+        <button class="btn secondary small" id="playBtn" disabled>▶ play</button>
+        <button class="btn secondary small" id="nextBtn" disabled>frame ▶</button>
+        <input type="range" id="scrub" class="scrub" min="0" max="100" value="0" step="0.001" disabled>
+      </div>
+      <div class="rowline tight" style="margin-top:8px">
+        <span class="readout"><b id="tNow">0.000</b> s &nbsp;·&nbsp; frame <b id="fNow">0</b> / <span id="fTot">0</span></span>
+        <span class="spacer"></span>
+        <label class="inline">fps <input type="number" id="fps" value="30" min="1" max="240" step="1"></label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>2 · Calibrate the scale</h2>
+      <div class="rowline">
+        <button class="btn secondary small" id="scaleBtn" disabled>📏 Set scale (click 2 points)</button>
+        <button class="btn secondary small" id="originBtn" disabled>🎯 Set origin (0,0)</button>
+        <span class="readout" id="scaleReadout">Scale: not set — distances in pixels</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>3 · Track objects</h2>
+      <div class="rowline">
+        <span class="readout">Mode:</span>
+        <div class="modes">
+          <div class="chip sel" id="modeManual">✋ Manual tap</div>
+          <div class="chip" id="modeAuto">🤖 Auto (OpenCV)</div>
+        </div>
+      </div>
+      <div class="rowline" style="margin-top:10px">
+        <span class="readout">Objects:</span>
+        <div class="tracks" id="tracks"></div>
+        <button class="btn secondary small" id="addTrackBtn">+ object</button>
+      </div>
+      <div class="rowline" id="manualHelp" style="margin-top:10px">
+        <span class="readout">Tap the object on each frame — it auto-advances and plots a point.</span>
+      </div>
+      <div class="rowline" id="autoHelp" style="margin-top:10px;display:none">
+        <button class="btn small" id="trackRunBtn" disabled>▶ Track to end</button>
+        <button class="btn secondary small" id="trackStopBtn" disabled>■ Stop</button>
+        <span class="readout" id="autoStatus">Click the object once to lock the target, then “Track to end”.</span>
+      </div>
+      <div class="rowline" style="margin-top:10px">
+        <button class="btn secondary small" id="clearTrackBtn">Clear this object’s points</button>
+        <button class="btn secondary small" id="delTrackBtn">Delete object</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- RIGHT: graph -->
+  <section class="pane right">
+    <div class="card graphcard">
+      <h2>Motion graph — points plot as you track</h2>
+      <div class="canvaswrap"><canvas id="graph"></canvas></div>
+      <div class="toolrow">
+        <label>Plot:
+          <select id="plotSel">
+            <option value="dist">Distance from origin</option>
+            <option value="x">X position</option>
+            <option value="y">Y position</option>
+          </select>
+        </label>
+        <label><input type="checkbox" id="connectChk" checked> Connect</label>
+        <button class="btn secondary small" id="fitBtn">📈 Best-fit</button>
+        <span class="spacer"></span>
+        <button class="btn secondary small" id="exportBtn">⬇ CSV</button>
+      </div>
+    </div>
+    <div class="card"><h2>Objects</h2><div class="legend" id="legend"></div></div>
+    <div class="card tablecard">
+      <h2>Data — selected object</h2>
+      <table><thead><tr><th>frame</th><th>t (s)</th><th>x (px)</th><th>y (px)</th><th id="valHead">value</th></tr></thead>
+        <tbody id="dataBody"></tbody></table>
+      <div class="empty" id="emptyMsg">No points yet.</div>
+    </div>
+  </section>
+</main>
+
+<div class="modal" id="helpModal">
+  <div class="modalbox">
+    <h2>How to use Better Video Analysis</h2>
+    <ol>
+      <li><b>Load a video</b> of something moving across the frame (a rolling ball, a walking person, a car). It stays on your device — nothing is uploaded.</li>
+      <li><b>Set the frame rate</b> (fps) to match your video so times are correct. Most phone video is 30 fps (slow-motion is often 120 or 240).</li>
+      <li><b>Calibrate the scale:</b> click <b>Set scale</b>, then click two points a known real distance apart (a metre stick, a floor tile) and type that distance in metres. Now pixels become metres. Optionally <b>Set origin</b> to choose where 0 m is.</li>
+      <li><b>Track the object:</b>
+        <ul>
+          <li><b>✋ Manual tap</b> — step through frames and tap the object each time. Best on a touchscreen and always reliable.</li>
+          <li><b>🤖 Auto (OpenCV)</b> — click the object once to lock onto it, then <b>Track to end</b> and OpenCV follows it frame-to-frame.</li>
+        </ul>
+      </li>
+      <li>Add more <b>objects</b> to compare several movers, each its own color. Read the <b>distance–time graph</b>, add a <b>best-fit line</b>, and export <b>CSV</b>.</li>
+    </ol>
+    <p style="color:var(--muted)"><b>Tip:</b> a straight distance–time line means constant speed (slope = speed); a curve means acceleration.</p>
+    <button class="btn" id="closeHelp">Got it</button>
+  </div>
+</div>
+
+<script>window.Module = { onRuntimeInitialized: function(){ onCvReady(); } };</script>
+<script async src="opencv.js"></script>
+<script>
+"use strict";
+const $ = s=>document.querySelector(s);
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+
+/* ---------- OpenCV readiness ---------- */
+let cvReady=false;
+function onCvReady(){
+  try{ if(typeof cv==='undefined'){ throw new Error('cv undefined'); }
+    // cv may be a promise in some builds
+    if(cv instanceof Promise){ cv.then(m=>{ window.cv=m; markCv(); }); return; }
+    markCv();
+  }catch(e){ cvFail(); }
+}
+function markCv(){
+  cvReady = (typeof cv!=='undefined' && typeof cv.matchTemplate==='function');
+  const b=$('#cvBadge');
+  if(cvReady){ b.textContent='OpenCV: ready'; b.className='badge ok'; }
+  else cvFail();
+}
+function cvFail(){
+  const b=$('#cvBadge'); b.textContent='OpenCV: unavailable (use Manual)'; b.className='badge warn';
+  cvReady=false;
+}
+// safety: if it never initializes
+setTimeout(()=>{ if(!cvReady && $('#cvBadge').textContent.indexOf('ready')<0) markCv(); }, 12000);
+
+/* ---------- Media / frame state ---------- */
+const video=document.createElement('video');
+video.playsInline=true; video.muted=true; video.preload='auto';
+const disp=$('#disp'), dctx=disp.getContext('2d');
+const work=document.createElement('canvas'), wctx=work.getContext('2d',{willReadFrequently:true});
+let vw=0, vh=0, duration=0, loaded=false;
+let fps=30;
+
+const PALETTE=['#e6294b','#4a7dff','#2fbf57','#ff8f2e','#b45cff','#22c7d6','#f7d038'];
+let tracks=[]; let activeTrack=0;
+let scaleMPP=null;            // metres per pixel (null = uncalibrated)
+let calLine=null;            // {p1,p2,meters}
+let origin=null;            // {x,y} image coords
+let mode='manual';
+let pendingAction=null;    // 'cal1'|'cal2'|'origin'|'target'
+let templateMat=null, lastPos=null, autoStop=false, tracking=false;
+
+/* ---------- File load ---------- */
+$('#uploadBtn').onclick=()=>$('#fileInput').click();
+$('#fileInput').onchange=e=>{ if(e.target.files[0]) loadFile(e.target.files[0]); };
+const stage=$('.stage');
+;['dragover','dragenter'].forEach(ev=>stage.addEventListener(ev,e=>{e.preventDefault();stage.style.borderColor='var(--accent)';}));
+;['dragleave','drop'].forEach(ev=>stage.addEventListener(ev,e=>{e.preventDefault();stage.style.borderColor='var(--line)';}));
+stage.addEventListener('drop',e=>{ const f=e.dataTransfer.files[0]; if(f&&f.type.startsWith('video')) loadFile(f); });
+
+function loadFile(file){
+  video.src=URL.createObjectURL(file);
+  $('#fileName').textContent=file.name;
+  video.addEventListener('loadedmetadata', onMeta, {once:true});
+}
+function onMeta(){
+  vw=video.videoWidth; vh=video.videoHeight; duration=video.duration;
+  disp.width=vw; disp.height=vh; work.width=vw; work.height=vh;
+  loaded=true;
+  $('#dropMsg').style.display='none'; disp.style.display='block';
+  $('#fTot').textContent=totalFrames();
+  ['firstBtn','prevBtn','playBtn','nextBtn','scrub','scaleBtn','originBtn','trackRunBtn'].forEach(id=>{ const el=$('#'+id); if(el) el.disabled=false; });
+  $('#scrub').max=duration;
+  if(tracks.length===0) addTrack();
+  seekTo(0).then(render);
+  status('Video loaded ('+vw+'×'+vh+', '+duration.toFixed(2)+'s). Calibrate the scale, then track.');
+}
+function totalFrames(){ return Math.max(1, Math.round(duration*fps)); }
+function curFrame(){ return Math.round(video.currentTime*fps); }
+
+/* ---------- Seeking / stepping ---------- */
+function seekTo(t){
+  return new Promise(res=>{
+    t=clamp(t,0,Math.max(0,duration-1e-4));
+    const on=()=>{ video.removeEventListener('seeked',on); res(); };
+    video.addEventListener('seeked',on);
+    video.currentTime=t;
+  });
+}
+async function gotoFrame(f){ f=clamp(f,0,totalFrames()); await seekTo(f/fps); render(); }
+$('#firstBtn').onclick=()=>gotoFrame(0);
+$('#prevBtn').onclick=()=>gotoFrame(curFrame()-1);
+$('#nextBtn').onclick=()=>gotoFrame(curFrame()+1);
+$('#scrub').oninput=e=>{ seekTo(parseFloat(e.target.value)).then(render); };
+$('#fps').onchange=e=>{ fps=clamp(parseInt(e.target.value)||30,1,240); $('#fTot').textContent=totalFrames(); render(); };
+
+let playing=false, rafPlay=null;
+$('#playBtn').onclick=()=>{
+  if(!loaded) return;
+  if(playing){ stopPlay(); } else {
+    playing=true; $('#playBtn').textContent='⏸ pause'; video.play();
+    const loop=()=>{ if(!playing) return; render(); rafPlay=requestAnimationFrame(loop); };
+    loop();
+    video.addEventListener('ended', stopPlay, {once:true});
+  }
+};
+function stopPlay(){ playing=false; $('#playBtn').textContent='▶ play'; video.pause();
+  cancelAnimationFrame(rafPlay); seekTo(curFrame()/fps).then(render); }
+
+/* ---------- Coordinate mapping ---------- */
+function toImg(e){
+  const r=disp.getBoundingClientRect();
+  return { x: clamp((e.clientX-r.left)*(vw/r.width),0,vw),
+           y: clamp((e.clientY-r.top )*(vh/r.height),0,vh) };
+}
+
+/* ---------- Rendering (native-res canvas, CSS-scaled) ---------- */
+function render(){
+  if(!loaded) return;
+  dctx.drawImage(video,0,0,vw,vh);
+  const S=Math.max(1.4, vw/500);            // overlay scale so marks stay visible when shrunk
+  // calibration line
+  if(calLine){
+    dctx.strokeStyle='#ffd166'; dctx.lineWidth=2*S;
+    dctx.beginPath(); dctx.moveTo(calLine.p1.x,calLine.p1.y); dctx.lineTo(calLine.p2.x,calLine.p2.y); dctx.stroke();
+    [calLine.p1,calLine.p2].forEach(p=>dot(p,'#ffd166',3*S));
+  }
+  // origin
+  if(origin){ crosshair(origin,'#ffffff',S); }
+  // tracks
+  tracks.forEach((tk,i)=>{
+    const pts=tk.points.slice().sort((a,b)=>a.frame-b.frame);
+    if(pts.length>1){ dctx.strokeStyle=tk.color; dctx.lineWidth=2*S; dctx.globalAlpha=.75;
+      dctx.beginPath(); pts.forEach((p,j)=>{ j?dctx.lineTo(p.x,p.y):dctx.moveTo(p.x,p.y); }); dctx.stroke(); dctx.globalAlpha=1; }
+    const cf=curFrame();
+    tk.points.forEach(p=>{ dot(p,tk.color, (p.frame===cf?4.5:3)*S, i===activeTrack); });
+  });
+  // template box (auto)
+  if(mode==='auto' && lastPos && templateMat){
+    const ts=templateMat.cols;
+    dctx.strokeStyle=tracks[activeTrack]?.color||'#fff'; dctx.lineWidth=2*S;
+    dctx.strokeRect(lastPos.x-ts/2,lastPos.y-ts/2,ts,ts);
+  }
+  // HUD
+  $('#tNow').textContent=video.currentTime.toFixed(3);
+  $('#fNow').textContent=curFrame();
+  $('#scrub').value=video.currentTime;
+}
+function dot(p,color,r,ring){ dctx.beginPath(); dctx.arc(p.x,p.y,r,0,7); dctx.fillStyle=color; dctx.fill();
+  dctx.lineWidth=Math.max(1,r*0.4); dctx.strokeStyle=ring?'#fff':'#0009'; dctx.stroke(); }
+function crosshair(p,color,S){ dctx.strokeStyle=color; dctx.lineWidth=1.5*S;
+  dctx.beginPath(); dctx.moveTo(p.x-9*S,p.y); dctx.lineTo(p.x+9*S,p.y);
+  dctx.moveTo(p.x,p.y-9*S); dctx.lineTo(p.x,p.y+9*S); dctx.stroke(); }
+
+/* ---------- Calibration / origin ---------- */
+$('#scaleBtn').onclick=()=>{ pendingAction='cal1'; status('Click the FIRST point of your known distance.'); };
+$('#originBtn').onclick=()=>{ pendingAction='origin'; status('Click where distance = 0 (the origin).'); };
+function finishCalibration(){
+  const px=Math.hypot(calLine.p2.x-calLine.p1.x, calLine.p2.y-calLine.p1.y);
+  const m=parseFloat(prompt('Real distance between the two points, in metres:','1.0'));
+  if(!m||m<=0||!px){ calLine=null; status('Scale canceled.'); render(); return; }
+  calLine.meters=m; scaleMPP=m/px;
+  $('#scaleReadout').textContent='Scale: '+scaleMPP.toFixed(4)+' m/px  ('+m+' m over '+px.toFixed(0)+' px)';
+  status('Scale set. Now track your object.'); render(); updateGraph();
+}
+
+/* ---------- Tracks ---------- */
+function addTrack(){
+  const color=PALETTE[tracks.length%PALETTE.length];
+  tracks.push({id:Date.now()+Math.random(), name:'Object '+(tracks.length+1), color, points:[]});
+  activeTrack=tracks.length-1; renderTracks(); renderLegend(); updateGraph();
+}
+$('#addTrackBtn').onclick=addTrack;
+function renderTracks(){
+  const c=$('#tracks'); c.innerHTML='';
+  tracks.forEach((tk,i)=>{
+    const el=document.createElement('div'); el.className='trackchip'+(i===activeTrack?' sel':'');
+    el.innerHTML=`<span class="sw" style="background:${tk.color}"></span><span class="n">${tk.name}</span><span class="cnt">(${tk.points.length})</span>`;
+    el.onclick=()=>{ activeTrack=i; resetTemplate(); renderTracks(); renderLegend(); updateGraph(); render(); };
+    c.appendChild(el);
+  });
+}
+$('#clearTrackBtn').onclick=()=>{ if(!tracks[activeTrack])return; if(confirm('Clear all points for '+tracks[activeTrack].name+'?')){ tracks[activeTrack].points=[]; resetTemplate(); afterData(); } };
+$('#delTrackBtn').onclick=()=>{ if(tracks.length<=1){ tracks[0].points=[]; resetTemplate(); afterData(); return; }
+  if(confirm('Delete '+tracks[activeTrack].name+'?')){ tracks.splice(activeTrack,1); activeTrack=0; resetTemplate(); afterData(); } };
+function afterData(){ renderTracks(); renderLegend(); updateGraph(); render(); }
+
+/* ---------- Mode ---------- */
+$('#modeManual').onclick=()=>setMode('manual');
+$('#modeAuto').onclick=()=>setMode('auto');
+function setMode(m){
+  mode=m;
+  $('#modeManual').classList.toggle('sel',m==='manual');
+  $('#modeAuto').classList.toggle('sel',m==='auto');
+  $('#manualHelp').style.display=m==='manual'?'flex':'none';
+  $('#autoHelp').style.display=m==='auto'?'flex':'none';
+  if(m==='auto' && !cvReady) status('OpenCV isn’t ready — Manual tap still works. '+$('#cvBadge').textContent);
+  resetTemplate(); render();
+}
+
+/* ---------- Point recording ---------- */
+function recordPoint(p, frame){
+  const tk=tracks[activeTrack]; if(!tk) return;
+  const f=(frame!==undefined)?frame:curFrame();
+  const t=f/fps;
+  const existing=tk.points.findIndex(q=>q.frame===f);
+  const pt={frame:f, t, x:p.x, y:p.y};
+  if(existing>=0) tk.points[existing]=pt; else tk.points.push(pt);
+}
+
+/* ---------- Canvas interaction ---------- */
+disp.addEventListener('pointerdown', e=>{
+  if(!loaded) return;
+  const p=toImg(e);
+  if(pendingAction==='cal1'){ calLine={p1:p,p2:p}; pendingAction='cal2'; status('Click the SECOND point.'); render(); return; }
+  if(pendingAction==='cal2'){ calLine.p2=p; pendingAction=null; finishCalibration(); return; }
+  if(pendingAction==='origin'){ origin=p; pendingAction=null; status('Origin set.'); render(); updateGraph(); return; }
+  if(mode==='manual'){
+    recordPoint(p); renderTracks(); renderLegend(); updateGraph();
+    gotoFrame(curFrame()+1);                 // auto-advance
+    return;
+  }
+  if(mode==='auto'){ setTarget(p); render(); }   // click locks/re-locks the target
+});
+
+/* ---------- OpenCV template tracking ---------- */
+const TS=41, MARGIN=46;
+function resetTemplate(){ if(templateMat){ templateMat.delete(); templateMat=null; } lastPos=null;
+  $('#trackRunBtn').disabled=!loaded; $('#autoStatus').textContent='Click the object once to lock the target, then “Track to end”.'; }
+function grayFrame(){
+  wctx.drawImage(video,0,0,vw,vh);
+  const src=cv.imread(work); const g=new cv.Mat();
+  cv.cvtColor(src,g,cv.COLOR_RGBA2GRAY); src.delete(); return g;
+}
+function setTarget(p){
+  if(!cvReady){ status('OpenCV not ready — switch to Manual tap.'); return; }
+  const g=grayFrame();
+  let tx=clamp(Math.round(p.x-TS/2),0,vw-TS), ty=clamp(Math.round(p.y-TS/2),0,vh-TS);
+  if(templateMat) templateMat.delete();
+  templateMat=g.roi(new cv.Rect(tx,ty,TS,TS)).clone(); g.delete();
+  lastPos={x:tx+TS/2,y:ty+TS/2};
+  recordPoint(lastPos); renderTracks(); renderLegend(); updateGraph();
+  $('#trackStopBtn').disabled=false;
+  $('#autoStatus').textContent='Target locked. Press “Track to end”.';
+}
+function trackStep(){
+  const g=grayFrame();
+  let sw=Math.min(TS+2*MARGIN,vw), sh=Math.min(TS+2*MARGIN,vh);
+  let sx=clamp(Math.round(lastPos.x-sw/2),0,vw-sw), sy=clamp(Math.round(lastPos.y-sh/2),0,vh-sh);
+  const roi=g.roi(new cv.Rect(sx,sy,sw,sh));
+  const res=new cv.Mat();
+  cv.matchTemplate(roi,templateMat,res,cv.TM_CCOEFF_NORMED);
+  const mm=cv.minMaxLoc(res);
+  const cx=sx+mm.maxLoc.x+TS/2, cy=sy+mm.maxLoc.y+TS/2;
+  g.delete(); roi.delete(); res.delete();
+  lastPos={x:cx,y:cy};
+  return {pos:lastPos, score:mm.maxVal};
+}
+$('#trackRunBtn').onclick=async ()=>{
+  if(mode!=='auto'){ setMode('auto'); }
+  if(!cvReady){ status('OpenCV not ready — use Manual tap.'); return; }
+  if(!templateMat){ status('Click the object once to lock the target first.'); return; }
+  autoStop=false; setTracking(true);
+  const end=totalFrames();
+  let f=curFrame();
+  while(f<end && !autoStop){
+    f++;
+    await seekTo(f/fps);
+    const r=trackStep();
+    recordPoint(r.pos,f);
+    render(); renderTracks(); renderLegend(); updateGraph();
+    $('#autoStatus').textContent='Tracking… frame '+f+'/'+end+'  (match '+(r.score).toFixed(2)+')';
+    await new Promise(r=>setTimeout(r,0));
+  }
+  setTracking(false);
+  $('#autoStatus').textContent='Done. Re-click the object to re-lock, or scrub back and Track again.';
+};
+$('#trackStopBtn').onclick=()=>{ autoStop=true; };
+function setTracking(on){ tracking=on;
+  $('#trackRunBtn').disabled=on; $('#trackStopBtn').disabled=!on;
+  ['prevBtn','nextBtn','playBtn','firstBtn','scrub'].forEach(id=>$('#'+id).disabled=on);
+}
+
+/* ---------- Graph ---------- */
+const gcanvas=$('#graph'), gctx=gcanvas.getContext('2d');
+let fitShown=false;
+$('#connectChk').onchange=updateGraph;
+$('#plotSel').onchange=()=>{ updateGraph(); renderData(); };
+$('#fitBtn').onclick=()=>{ fitShown=!fitShown; $('#fitBtn').classList.toggle('active',fitShown); updateGraph(); };
+
+function unit(){ return scaleMPP?'m':'px'; }
+function valueOf(tk,p){                     // returns plotted y in current units
+  const k=scaleMPP||1;
+  const o=origin|| (tk.points.length?tk.points.slice().sort((a,b)=>a.frame-b.frame)[0]:{x:0,y:0});
+  const sel=$('#plotSel').value;
+  if(sel==='x') return (p.x-o.x)*k;
+  if(sel==='y') return (p.y-o.y)*k;
+  return Math.hypot(p.x-o.x,p.y-o.y)*k;
+}
+function seriesFor(tk){ return tk.points.slice().sort((a,b)=>a.t-b.t).map(p=>({t:p.t,v:valueOf(tk,p)})); }
+function linFit(pts){ const n=pts.length; let sx=0,sy=0,sxx=0,sxy=0;
+  pts.forEach(p=>{sx+=p.t;sy+=p.v;sxx+=p.t*p.t;sxy+=p.t*p.v;});
+  const den=n*sxx-sx*sx; if(Math.abs(den)<1e-9)return null;
+  const m=(n*sxy-sx*sy)/den; return {m, b:(sy-m*sx)/n}; }
+function niceMax(v){ if(v<=0)return 1; const p=Math.pow(10,Math.floor(Math.log10(v))); const n=v/p;
+  const m=n<=1?1:n<=2?2:n<=5?5:10; return m*p; }
+
+function updateGraph(){ drawGraph(); renderData(); }
+function drawGraph(){
+  const wrap=gcanvas.parentElement, dpr=window.devicePixelRatio||1;
+  const bw=Math.round(wrap.clientWidth*dpr), bh=Math.round(wrap.clientHeight*dpr);
+  if(gcanvas.width!==bw||gcanvas.height!==bh){ gcanvas.width=bw; gcanvas.height=bh; }
+  gctx.setTransform(dpr,0,0,dpr,0,0);
+  const W=gcanvas.clientWidth,H=gcanvas.clientHeight;
+  gctx.clearRect(0,0,W,H);
+  const padL=52,padR=14,padT=14,padB=36, plotW=W-padL-padR, plotH=H-padT-padB;
+
+  // data extents
+  let tmax=0, vmin=0, vmax=0, any=false;
+  tracks.forEach(tk=>seriesFor(tk).forEach(p=>{ any=true; tmax=Math.max(tmax,p.t); vmax=Math.max(vmax,p.v); vmin=Math.min(vmin,p.v); }));
+  tmax=niceMax(Math.max(tmax,0.5));
+  const negative=vmin<0;
+  const AV=niceMax(Math.max(Math.abs(vmax),Math.abs(vmin),0.5));
+  const yTop=AV, yBot=negative?-AV:0;
+  const X=t=>padL+(t/tmax)*plotW;
+  const Y=v=>padT+plotH-((v-yBot)/(yTop-yBot))*plotH;
+
+  gctx.strokeStyle='#2c3d6b'; gctx.fillStyle='#9fb0d6'; gctx.font='11px -apple-system,sans-serif';
+  gctx.textAlign='center'; gctx.textBaseline='top';
+  for(let i=0;i<=5;i++){ const t=tmax*i/5, x=X(t);
+    gctx.globalAlpha=i?0.35:1; gctx.beginPath(); gctx.moveTo(x,padT); gctx.lineTo(x,padT+plotH); gctx.stroke();
+    gctx.globalAlpha=1; gctx.fillText(t.toFixed(t<1?2:1), x, padT+plotH+6); }
+  gctx.textAlign='right'; gctx.textBaseline='middle';
+  for(let i=0;i<=5;i++){ const v=yBot+(yTop-yBot)*i/5, y=Y(v);
+    gctx.globalAlpha=(Math.abs(v)<1e-9)?1:0.35; gctx.beginPath(); gctx.moveTo(padL,y); gctx.lineTo(padL+plotW,y); gctx.stroke();
+    gctx.globalAlpha=1; gctx.fillText(v.toFixed(AV<2?2:1), padL-8, y); }
+  gctx.fillStyle='#eaf0ff'; gctx.textAlign='center'; gctx.textBaseline='top'; gctx.font='12px -apple-system,sans-serif';
+  gctx.fillText('Time (s)', padL+plotW/2, H-15);
+  gctx.save(); gctx.translate(15,padT+plotH/2); gctx.rotate(-Math.PI/2);
+  const yl=$('#plotSel').value==='x'?'X':$('#plotSel').value==='y'?'Y':'Distance';
+  gctx.fillText(yl+' ('+unit()+')',0,0); gctx.restore();
+
+  if(!any) return;
+  // connect + points
+  tracks.forEach(tk=>{
+    const s=seriesFor(tk); if(!s.length) return;
+    if($('#connectChk').checked && s.length>1){ gctx.strokeStyle=tk.color; gctx.lineWidth=2; gctx.globalAlpha=.7;
+      gctx.beginPath(); s.forEach((p,i)=>{ const x=X(p.t),y=Y(p.v); i?gctx.lineTo(x,y):gctx.moveTo(x,y); }); gctx.stroke(); gctx.globalAlpha=1; }
+    s.forEach(p=>{ gctx.beginPath(); gctx.arc(X(p.t),Y(p.v),4.5,0,7); gctx.fillStyle=tk.color; gctx.fill();
+      gctx.lineWidth=1.5; gctx.strokeStyle='#0f1830'; gctx.stroke(); });
+  });
+  // best-fit for active track
+  if(fitShown && tracks[activeTrack]){
+    const s=seriesFor(tracks[activeTrack]);
+    if(s.length>=2){ const f=linFit(s);
+      if(f){ const col=tracks[activeTrack].color;
+        gctx.save(); gctx.beginPath(); gctx.rect(padL,padT,plotW,plotH); gctx.clip();
+        gctx.strokeStyle=col; gctx.lineWidth=2.5; gctx.setLineDash([7,5]);
+        gctx.beginPath(); gctx.moveTo(X(0),Y(f.b)); gctx.lineTo(X(tmax),Y(f.m*tmax+f.b)); gctx.stroke();
+        gctx.setLineDash([]); gctx.restore();
+        const sign=f.b>=0?'+':'−';
+        const label=`${yl.toLowerCase()} = ${f.m.toFixed(3)}·t ${sign} ${Math.abs(f.b).toFixed(3)}  (slope ${f.m.toFixed(3)} ${unit()}/s)`;
+        gctx.font='bold 12px -apple-system,sans-serif'; gctx.textAlign='left'; gctx.textBaseline='middle';
+        const tw=gctx.measureText(label).width; let lx=padL+10, ly=padT+14;
+        gctx.fillStyle='rgba(12,20,40,.88)'; gctx.fillRect(lx-6,ly-10,tw+12,20);
+        gctx.strokeStyle=col; gctx.lineWidth=1.5; gctx.strokeRect(lx-6,ly-10,tw+12,20);
+        gctx.fillStyle=col; gctx.fillText(label,lx,ly);
+      }
+    }
+  }
+}
+window.addEventListener('resize', ()=>{ drawGraph(); if(loaded) render(); });
+
+/* ---------- Legend + data table ---------- */
+function renderLegend(){ const c=$('#legend'); c.innerHTML='';
+  tracks.forEach((tk,i)=>{ const el=document.createElement('div'); el.className='item';
+    el.innerHTML=`<span class="sw" style="background:${tk.color}"></span>${tk.name}${i===activeTrack?' <span style="color:var(--accent)">◄</span>':''} <span style="color:var(--muted)">· ${tk.points.length} pts</span>`;
+    c.appendChild(el); }); }
+function renderData(){
+  const tk=tracks[activeTrack]; const tb=$('#dataBody'); tb.innerHTML='';
+  $('#valHead').textContent=($('#plotSel').value==='x'?'x':$('#plotSel').value==='y'?'y':'dist')+' ('+unit()+')';
+  const s=(tk?tk.points:[]).slice().sort((a,b)=>a.frame-b.frame);
+  $('#emptyMsg').style.display=s.length?'none':'block';
+  s.forEach(p=>{ const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${p.frame}</td><td>${p.t.toFixed(3)}</td><td>${p.x.toFixed(0)}</td><td>${p.y.toFixed(0)}</td><td>${valueOf(tk,p).toFixed(3)}</td>`;
+    tb.appendChild(tr); });
+}
+
+/* ---------- CSV ---------- */
+$('#exportBtn').onclick=()=>{
+  let rows=[['object','frame','time_s','x_px','y_px','value_'+unit(),'plot_'+$('#plotSel').value]];
+  tracks.forEach(tk=>tk.points.slice().sort((a,b)=>a.frame-b.frame).forEach(p=>{
+    rows.push([tk.name,p.frame,p.t.toFixed(4),p.x.toFixed(1),p.y.toFixed(1),valueOf(tk,p).toFixed(4),$('#plotSel').value]); }));
+  if(rows.length<2){ alert('No data to export yet.'); return; }
+  const csv=rows.map(r=>r.join(',')).join('\n');
+  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+  a.download='video-analysis-data.csv'; a.click(); URL.revokeObjectURL(a.href);
+};
+
+/* ---------- Misc ---------- */
+function status(msg){ $('#status').textContent=msg; }
+$('#helpBtn').onclick=()=>$('#helpModal').classList.add('show');
+$('#closeHelp').onclick=()=>$('#helpModal').classList.remove('show');
+$('#helpModal').onclick=e=>{ if(e.target.id==='helpModal') $('#helpModal').classList.remove('show'); };
+
+renderTracks(); renderLegend(); renderData(); drawGraph();
+</script>
+</body>
+</html>
