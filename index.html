@@ -191,6 +191,7 @@
         <button class="btn small" id="trackRunBtn" disabled>▶ Track to end</button>
         <button class="btn secondary small" id="trackStopBtn" disabled>■ Stop</button>
         <label class="inline">Speed <select id="reachSel"><option value="normal">normal</option><option value="far">fast</option><option value="vfar">very fast</option></select></label>
+        <label class="inline" title="Slowly adapt the template to the object's changing look (bounded so it can't drift)"><input type="checkbox" id="adaptChk" checked> Adapt</label>
         <span class="readout" id="autoStatus">Drag a box around the object, then “Track to end”.</span>
       </div>
       <div class="rowline" id="confirmRow" style="margin-top:8px;display:none">
@@ -257,7 +258,7 @@
       <li><b>Track the object:</b>
         <ul>
           <li><b>✋ Manual tap</b> — step through frames and <b>double-tap</b> the object each time (double-tap so pinch/scroll gestures don’t drop stray points). Best on a touchscreen and always reliable.</li>
-          <li><b>🤖 Auto (OpenCV)</b> — <b>drag a box</b> around the object to lock onto it, then <b>Track to end</b> and OpenCV follows it frame-to-frame, predicting its motion. A tighter box on a distinctive, high-contrast part tracks best; raise <b>Speed</b> for fast movers like cars.</li>
+          <li><b>🤖 Auto (OpenCV)</b> — <b>drag a box</b> around the object to lock onto it, then <b>Track to end</b> and OpenCV follows it frame-to-frame, predicting its motion. A tighter box on a distinctive, high-contrast part tracks best; raise <b>Speed</b> for fast movers like cars. It slowly <b>adapts</b> to the object’s changing look (angle, lighting) — bounded so it can’t drift onto the background; uncheck <b>Adapt</b> if a clip misbehaves.</li>
         </ul>
       </li>
       <li>Add more <b>objects</b> to compare several movers, each its own color. Read the <b>distance–time graph</b>, add a <b>best-fit line</b>, and export <b>CSV</b>.</li>
@@ -314,7 +315,7 @@ let calLine=null;            // {p1,p2,meters}
 let origin=null;            // {x,y} image coords
 let mode='manual';
 let pendingAction=null;    // 'cal1'|'cal2'|'origin'|'target'
-let templateMat=null, lastPos=null, autoStop=false, tracking=false;
+let templateMat=null, anchorMat=null, lastPos=null, autoStop=false, tracking=false;   // anchorMat = frozen original, limits drift
 let boxSel=null;             // in-progress auto-tracking box (image coords)
 let trackVel={x:0,y:0}, trackMiss=0, tmplW=0, tmplH=0, goodStreak=0, everLocked=false;   // motion model + full-res template size
 let confirmResolve=null;     // pending "is this still the object?" prompt
@@ -608,7 +609,8 @@ disp.addEventListener('pointercancel', ()=>{ activePtrs=Math.max(0,activePtrs-1)
 /* ---------- OpenCV template tracking ---------- */
 const TS=41;
 const BASE_MARGIN=28, MAX_MARGIN=260, MATCH_GATE=0.30, MISS_SOFT=4;   // proc-space search px + confidence
-function resetTemplate(){ if(templateMat){ templateMat.delete(); templateMat=null; } lastPos=null; trackVel={x:0,y:0}; trackMiss=0; goodStreak=0; everLocked=false;
+const ADAPT_ALPHA=0.08, UPDATE_GATE=0.55, ANCHOR_FLOOR=0.45;         // appearance adaptation: slow blend, high-confidence only, bounded to the original
+function resetTemplate(){ if(templateMat){ templateMat.delete(); templateMat=null; } if(anchorMat){ anchorMat.delete(); anchorMat=null; } lastPos=null; trackVel={x:0,y:0}; trackMiss=0; goodStreak=0; everLocked=false;
   $('#trackRunBtn').disabled=!loaded; $('#autoStatus').textContent='Drag a box around the object, then “Track to end”.'; }
 function grayFrame(){
   wctx.drawImage(video,0,0,vw,vh);
@@ -630,6 +632,7 @@ function setTemplateRect(rx,ry,rw,rh){          // box (full-res coords) -> temp
   const g=grayProc();
   if(templateMat) templateMat.delete();
   templateMat=g.roi(new cv.Rect(px,py,pwid,phei)).clone(); g.delete();
+  if(anchorMat) anchorMat.delete(); anchorMat=templateMat.clone();   // freeze the original appearance
   lastPos={x:rx+rw/2, y:ry+rh/2}; tmplW=rw; tmplH=rh;
   trackVel={x:0,y:0}; trackMiss=0; goodStreak=0; everLocked=false;
   pushUndo(curFrame());                         // locking a target drops a point — make it undoable
@@ -665,12 +668,30 @@ function trackStep(){
   const maxJump = everLocked ? Math.max(18, speed*1.6) : (margin + tw);
   const good = (score>=MATCH_GATE) && (jump<=maxJump);
   if(!good){ mcx=pcx; mcy=pcy; }                                  // reject: coast on the motion model instead
+  // Appearance adaptation: on a strong, motion-consistent, fully-in-frame match, nudge the template
+  // toward how the object looks now — slowly (small blend) and never far from the frozen original.
+  if(good && everLocked && score>=UPDATE_GATE && adaptOn()){
+    const em2=Math.max(4, Math.max(tw,th)*0.5);
+    if(mcx>em2 && mcy>em2 && mcx<pw-em2 && mcy<ph-em2) adaptTemplate(g, mcx, mcy, tw, th);
+  }
   g.delete(); roi.delete(); res.delete();
   let fx=clamp(mcx/s, tmplW/2, vw-tmplW/2), fy=clamp(mcy/s, tmplH/2, vh-tmplH/2);
   if(good){ trackVel={x:0.5*trackVel.x+0.5*(fx-lastPos.x), y:0.5*trackVel.y+0.5*(fy-lastPos.y)}; goodStreak++; if(goodStreak>=2) everLocked=true; }
   else goodStreak=0;
   lastPos={x:fx,y:fy};
   return {pos:lastPos, score, good};
+}
+function adaptOn(){ const c=$('#adaptChk'); return !c || c.checked; }
+function corr(a,b){ const r=new cv.Mat(); cv.matchTemplate(a,b,r,cv.TM_CCOEFF_NORMED); const v=cv.minMaxLoc(r).maxVal; r.delete(); return v; }
+function adaptTemplate(g, cx, cy, tw, th){       // g: proc gray frame; cx,cy: matched center (proc)
+  if(!templateMat || !anchorMat) return;
+  const px=clamp(Math.round(cx-tw/2),0,pw-tw), py=clamp(Math.round(cy-th/2),0,ph-th);
+  const patch=g.roi(new cv.Rect(px,py,tw,th));
+  const blended=new cv.Mat();
+  cv.addWeighted(templateMat,1-ADAPT_ALPHA,patch,ADAPT_ALPHA,0,blended);   // slow exponential blend
+  patch.delete();
+  if(corr(blended,anchorMat) >= ANCHOR_FLOOR){ templateMat.delete(); templateMat=blended; }  // commit if still close to original
+  else blended.delete();                                                    // too far from original -> freeze adaptation
 }
 $('#trackRunBtn').onclick=async ()=>{
   if(mode!=='auto'){ setMode('auto'); }
