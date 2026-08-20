@@ -147,7 +147,8 @@
       <div class="rowline tight" style="margin-top:8px">
         <span class="readout"><b id="tNow">0.000</b> s &nbsp;·&nbsp; frame <b id="fNow">0</b> / <span id="fTot">0</span></span>
         <span class="spacer"></span>
-        <label class="inline">fps <input type="number" id="fps" value="30" min="1" max="240" step="1"></label>
+        <button class="btn secondary small" id="fpsBtn" title="Change frame rate (usually leave at 30)">⚙ <span id="fpsShow">30</span> fps</button>
+        <label class="inline" id="fpsEdit" style="display:none">fps <input type="number" id="fps" value="30" min="1" max="240" step="1"> <button class="btn small" id="fpsDone">OK</button></label>
       </div>
     </div>
 
@@ -351,7 +352,13 @@ $('#firstBtn').onclick=()=>gotoFrame(0);
 $('#prevBtn').onclick=()=>gotoFrame(curFrame()-1);
 $('#nextBtn').onclick=()=>gotoFrame(curFrame()+1);
 $('#scrub').oninput=e=>{ seekTo(parseFloat(e.target.value)).then(render); };
-$('#fps').onchange=e=>{ fps=clamp(parseInt(e.target.value)||30,1,240); $('#fTot').textContent=totalFrames(); render(); };
+function applyFps(){ fps=clamp(parseInt($('#fps').value)||30,1,240); $('#fps').value=fps; $('#fpsShow').textContent=fps; $('#fTot').textContent=totalFrames(); if(loaded) render(); }
+function openFpsEdit(){ $('#fpsBtn').style.display='none'; $('#fpsEdit').style.display=''; const i=$('#fps'); try{ i.focus(); i.select(); }catch(_){} }
+function closeFpsEdit(){ applyFps(); $('#fpsEdit').style.display='none'; $('#fpsBtn').style.display=''; }
+$('#fpsBtn').onclick=openFpsEdit;
+$('#fpsDone').onclick=closeFpsEdit;
+$('#fps').onchange=applyFps;
+$('#fps').addEventListener('keydown', e=>{ if(e.key==='Enter') closeFpsEdit(); });
 
 let playing=false, rafPlay=null;
 $('#playBtn').onclick=()=>{
