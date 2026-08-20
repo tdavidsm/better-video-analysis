@@ -190,6 +190,7 @@
       <div class="rowline" id="autoHelp" style="margin-top:10px;display:none">
         <button class="btn small" id="trackRunBtn" disabled>▶ Track to end</button>
         <button class="btn secondary small" id="trackStopBtn" disabled>■ Stop</button>
+        <label class="inline">Speed <select id="reachSel"><option value="normal">normal</option><option value="far">fast</option><option value="vfar">very fast</option></select></label>
         <span class="readout" id="autoStatus">Drag a box around the object, then “Track to end”.</span>
       </div>
       <div class="rowline" id="editHelp" style="margin-top:10px;display:none">
@@ -251,7 +252,7 @@
       <li><b>Track the object:</b>
         <ul>
           <li><b>✋ Manual tap</b> — step through frames and <b>double-tap</b> the object each time (double-tap so pinch/scroll gestures don’t drop stray points). Best on a touchscreen and always reliable.</li>
-          <li><b>🤖 Auto (OpenCV)</b> — <b>drag a box</b> around the object to lock onto it, then <b>Track to end</b> and OpenCV follows it frame-to-frame. A tighter box around a distinctive part tracks best.</li>
+          <li><b>🤖 Auto (OpenCV)</b> — <b>drag a box</b> around the object to lock onto it, then <b>Track to end</b> and OpenCV follows it frame-to-frame, predicting its motion. A tighter box on a distinctive, high-contrast part tracks best; raise <b>Speed</b> for fast movers like cars.</li>
         </ul>
       </li>
       <li>Add more <b>objects</b> to compare several movers, each its own color. Read the <b>distance–time graph</b>, add a <b>best-fit line</b>, and export <b>CSV</b>.</li>
@@ -296,7 +297,9 @@ const video=document.createElement('video');
 video.playsInline=true; video.muted=true; video.preload='auto';
 const disp=$('#disp'), dctx=disp.getContext('2d');
 const work=document.createElement('canvas'), wctx=work.getContext('2d',{willReadFrequently:true});
+const proc=document.createElement('canvas'), pctx=proc.getContext('2d',{willReadFrequently:true}); // downscaled frame for fast, robust matching
 let vw=0, vh=0, duration=0, loaded=false;
+let procScale=1, pw=0, ph=0;
 let fps=30;
 
 const PALETTE=['#e6294b','#4a7dff','#2fbf57','#ff8f2e','#b45cff','#22c7d6','#f7d038'];
@@ -308,6 +311,7 @@ let mode='manual';
 let pendingAction=null;    // 'cal1'|'cal2'|'origin'|'target'
 let templateMat=null, lastPos=null, autoStop=false, tracking=false;
 let boxSel=null;             // in-progress auto-tracking box (image coords)
+let trackVel={x:0,y:0}, trackMiss=0, tmplW=0, tmplH=0;   // motion model + full-res template size
 let selected=new Set();      // selected point frames (active track)
 let undoStack=[];            // snapshots for undoing manual taps
 let timeZero=0;              // seconds subtracted from every plotted/recorded time
@@ -330,6 +334,9 @@ function loadFile(file){
 function onMeta(){
   vw=video.videoWidth; vh=video.videoHeight; duration=video.duration;
   disp.width=vw; disp.height=vh; work.width=vw; work.height=vh;
+  procScale=Math.min(1, 560/Math.max(vw,vh));             // downscale big frames for matching
+  pw=Math.max(2,Math.round(vw*procScale)); ph=Math.max(2,Math.round(vh*procScale));
+  proc.width=pw; proc.height=ph;
   loaded=true;
   $('#dropMsg').style.display='none'; disp.style.display='block';
   $('#fTot').textContent=totalFrames();
@@ -420,9 +427,8 @@ function render(){
   });
   // template box (auto) — sized to the actual template
   if(mode==='auto' && lastPos && templateMat){
-    const tw=templateMat.cols, th=templateMat.rows;
     dctx.strokeStyle=tracks[activeTrack]?.color||'#fff'; dctx.lineWidth=2*S;
-    dctx.strokeRect(lastPos.x-tw/2,lastPos.y-th/2,tw,th);
+    dctx.strokeRect(lastPos.x-tmplW/2,lastPos.y-tmplH/2,tmplW,tmplH);
   }
   // live box-selection rubber-band (auto)
   if(boxSel){
@@ -591,62 +597,84 @@ disp.addEventListener('pointerup', e=>{
 disp.addEventListener('pointercancel', ()=>{ activePtrs=Math.max(0,activePtrs-1); dispDown=null; boxSel=null; render(); });
 
 /* ---------- OpenCV template tracking ---------- */
-const TS=41, MARGIN=46;
-function resetTemplate(){ if(templateMat){ templateMat.delete(); templateMat=null; } lastPos=null;
+const TS=41;
+const BASE_MARGIN=28, MAX_MARGIN=150, MATCH_GATE=0.30, MAX_MISS=10;   // proc-space search px + confidence
+function resetTemplate(){ if(templateMat){ templateMat.delete(); templateMat=null; } lastPos=null; trackVel={x:0,y:0}; trackMiss=0;
   $('#trackRunBtn').disabled=!loaded; $('#autoStatus').textContent='Drag a box around the object, then “Track to end”.'; }
 function grayFrame(){
   wctx.drawImage(video,0,0,vw,vh);
   const src=cv.imread(work); const g=new cv.Mat();
   cv.cvtColor(src,g,cv.COLOR_RGBA2GRAY); src.delete(); return g;
 }
-function setTemplateRect(rx,ry,rw,rh){          // box (image coords) -> tracking template
+function grayProc(){                              // current frame, downscaled, single-channel
+  pctx.drawImage(video,0,0,pw,ph);
+  const src=cv.imread(proc); const g=new cv.Mat();
+  cv.cvtColor(src,g,cv.COLOR_RGBA2GRAY); src.delete(); return g;
+}
+function setTemplateRect(rx,ry,rw,rh){          // box (full-res coords) -> template captured in proc space
   if(!cvReady){ status('OpenCV not ready — switch to Manual tap.'); return; }
   rx=clamp(Math.round(rx),0,vw-8); ry=clamp(Math.round(ry),0,vh-8);
   rw=Math.max(8,Math.min(Math.round(rw), vw-rx)); rh=Math.max(8,Math.min(Math.round(rh), vh-ry));
-  const g=grayFrame();
+  const s=procScale;
+  let px=clamp(Math.round(rx*s),0,pw-6), py=clamp(Math.round(ry*s),0,ph-6);
+  let pwid=Math.max(6,Math.min(Math.round(rw*s), pw-px)), phei=Math.max(6,Math.min(Math.round(rh*s), ph-py));
+  const g=grayProc();
   if(templateMat) templateMat.delete();
-  templateMat=g.roi(new cv.Rect(rx,ry,rw,rh)).clone(); g.delete();
-  lastPos={x:rx+rw/2, y:ry+rh/2};
-  pushUndo(curFrame());                        // locking a target drops a point — make it undoable
+  templateMat=g.roi(new cv.Rect(px,py,pwid,phei)).clone(); g.delete();
+  lastPos={x:rx+rw/2, y:ry+rh/2}; tmplW=rw; tmplH=rh;
+  trackVel={x:0,y:0}; trackMiss=0;
+  pushUndo(curFrame());                         // locking a target drops a point — make it undoable
   recordPoint(lastPos); renderTracks(); renderLegend(); updateGraph();
   $('#trackStopBtn').disabled=false;
   $('#autoStatus').textContent='Target box set ('+rw+'×'+rh+' px). Press “Track to end”.';
   render();
 }
 function setTarget(p){ setTemplateRect(p.x-TS/2, p.y-TS/2, TS, TS); }   // fixed-size fallback
+function reachExtra(){ const v=$('#reachSel')&&$('#reachSel').value; return v==='vfar'?70:v==='far'?36:0; }  // proc px
 function trackStep(){
-  const g=grayFrame();
-  const tw=templateMat.cols, th=templateMat.rows;                 // template may be any size (box)
-  let sw=Math.min(tw+2*MARGIN,vw), sh=Math.min(th+2*MARGIN,vh);
-  let sx=clamp(Math.round(lastPos.x-sw/2),0,vw-sw), sy=clamp(Math.round(lastPos.y-sh/2),0,vh-sh);
+  const s=procScale, g=grayProc();
+  const tw=templateMat.cols, th=templateMat.rows;                 // proc-space template (any size)
+  // constant-velocity prediction (proc space): a car keeps going where it was going
+  const lpx=lastPos.x*s, lpy=lastPos.y*s, vx=trackVel.x*s, vy=trackVel.y*s;
+  const pcx=lpx+vx, pcy=lpy+vy, speed=Math.hypot(vx,vy);
+  const margin=Math.min(MAX_MARGIN, BASE_MARGIN + reachExtra() + speed*1.6);   // window grows with speed
+  let sw=Math.min(Math.round(tw+2*margin),pw), sh=Math.min(Math.round(th+2*margin),ph);
+  let sx=clamp(Math.round(pcx-sw/2),0,pw-sw), sy=clamp(Math.round(pcy-sh/2),0,ph-sh);
   const roi=g.roi(new cv.Rect(sx,sy,sw,sh));
   const res=new cv.Mat();
   cv.matchTemplate(roi,templateMat,res,cv.TM_CCOEFF_NORMED);
-  const mm=cv.minMaxLoc(res);
-  const cx=sx+mm.maxLoc.x+tw/2, cy=sy+mm.maxLoc.y+th/2;
+  const mm=cv.minMaxLoc(res), score=mm.maxVal;
+  let mcx,mcy,matched;
+  if(score>=MATCH_GATE){ mcx=sx+mm.maxLoc.x+tw/2; mcy=sy+mm.maxLoc.y+th/2; matched=true; trackMiss=0; }
+  else { mcx=pcx; mcy=pcy; matched=false; trackMiss++; }         // weak match -> coast on the motion model
   g.delete(); roi.delete(); res.delete();
-  lastPos={x:cx,y:cy};
-  return {pos:lastPos, score:mm.maxVal};
+  let fx=clamp(mcx/s, tmplW/2, vw-tmplW/2), fy=clamp(mcy/s, tmplH/2, vh-tmplH/2);
+  if(matched){ trackVel={x:0.5*trackVel.x+0.5*(fx-lastPos.x), y:0.5*trackVel.y+0.5*(fy-lastPos.y)}; }  // smoothed
+  lastPos={x:fx,y:fy};
+  return {pos:lastPos, score, matched};
 }
 $('#trackRunBtn').onclick=async ()=>{
   if(mode!=='auto'){ setMode('auto'); }
   if(!cvReady){ status('OpenCV not ready — use Manual tap.'); return; }
-  if(!templateMat){ status('Click the object once to lock the target first.'); return; }
+  if(!templateMat){ status('Drag a box around the object first.'); return; }
   pushUndo(curFrame());                        // one undo reverts the whole auto-track run
-  autoStop=false; setTracking(true);
+  autoStop=false; trackMiss=0; setTracking(true);
   const end=totalFrames();
-  let f=curFrame();
+  let f=curFrame(), lost=false;
   while(f<end && !autoStop){
     f++;
     await seekTo(f/fps);
     const r=trackStep();
     recordPoint(r.pos,f);
     render(); renderTracks(); renderLegend(); updateGraph();
-    $('#autoStatus').textContent='Tracking… frame '+f+'/'+end+'  (match '+(r.score).toFixed(2)+')';
-    await new Promise(r=>setTimeout(r,0));
+    $('#autoStatus').textContent=(r.matched?'Tracking':'Coasting (weak match)')+' … frame '+f+'/'+end+' · match '+r.score.toFixed(2);
+    if(trackMiss>=MAX_MISS){ lost=true; break; }
+    await new Promise(res=>setTimeout(res,0));
   }
   setTracking(false);
-  $('#autoStatus').textContent='Done. Re-click the object to re-lock, or scrub back and Track again.';
+  $('#autoStatus').textContent = lost
+    ? 'Lost it (weak matches). Scrub back to where it’s clear, draw a tighter box on a distinctive part, bump Speed, and Track again.'
+    : 'Done. Re-draw the box to re-lock, or scrub back and Track again.';
 };
 $('#trackStopBtn').onclick=()=>{ autoStop=true; };
 function setTracking(on){ tracking=on;
