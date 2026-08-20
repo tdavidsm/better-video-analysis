@@ -146,6 +146,8 @@
       </div>
       <div class="rowline tight" style="margin-top:8px">
         <span class="readout"><b id="tNow">0.000</b> s &nbsp;·&nbsp; frame <b id="fNow">0</b> / <span id="fTot">0</span></span>
+        <button class="btn secondary small" id="tzeroBtn" disabled>⏱ Set t=0 here</button>
+        <button class="btn secondary small" id="tzeroResetBtn" style="display:none">t=0 ✕</button>
         <span class="spacer"></span>
         <button class="btn secondary small" id="fpsBtn" title="Change frame rate (usually leave at 30)">⚙ <span id="fpsShow">30</span> fps</button>
         <label class="inline" id="fpsEdit" style="display:none">fps <input type="number" id="fps" value="30" min="1" max="240" step="1"> <button class="btn small" id="fpsDone">OK</button></label>
@@ -306,6 +308,7 @@ let pendingAction=null;    // 'cal1'|'cal2'|'origin'|'target'
 let templateMat=null, lastPos=null, autoStop=false, tracking=false;
 let selected=new Set();      // selected point frames (active track)
 let undoStack=[];            // snapshots for undoing manual taps
+let timeZero=0;              // seconds subtracted from every plotted/recorded time
 let gview=null;              // last graph transform, for hit-testing
 let brush=null, gDown=null;  // graph drag/brush state
 
@@ -328,7 +331,8 @@ function onMeta(){
   loaded=true;
   $('#dropMsg').style.display='none'; disp.style.display='block';
   $('#fTot').textContent=totalFrames();
-  ['firstBtn','prevBtn','playBtn','nextBtn','scrub','scaleBtn','originBtn','trackRunBtn'].forEach(id=>{ const el=$('#'+id); if(el) el.disabled=false; });
+  ['firstBtn','prevBtn','playBtn','nextBtn','scrub','scaleBtn','originBtn','trackRunBtn','tzeroBtn'].forEach(id=>{ const el=$('#'+id); if(el) el.disabled=false; });
+  timeZero=0; $('#tzeroBtn').textContent='⏱ Set t=0 here'; $('#tzeroResetBtn').style.display='none';
   $('#scrub').max=duration;
   if(tracks.length===0) addTrack();
   updateUndoBtn();
@@ -359,6 +363,15 @@ $('#fpsBtn').onclick=openFpsEdit;
 $('#fpsDone').onclick=closeFpsEdit;
 $('#fps').onchange=applyFps;
 $('#fps').addEventListener('keydown', e=>{ if(e.key==='Enter') closeFpsEdit(); });
+
+// t = 0 marker: rebase all plotted/recorded times to the current frame (non-destructive)
+function refreshTimeUI(){ if(loaded) render(); updateGraph(); updateSelUI(); }
+$('#tzeroBtn').onclick=()=>{ if(!loaded) return; timeZero=curFrame()/fps;
+  $('#tzeroBtn').textContent='⏱ t=0 @ frame '+curFrame(); $('#tzeroResetBtn').style.display='';
+  status('t = 0 set at frame '+curFrame()+' — times are now measured from here.'); refreshTimeUI(); };
+$('#tzeroResetBtn').onclick=()=>{ timeZero=0;
+  $('#tzeroBtn').textContent='⏱ Set t=0 here'; $('#tzeroResetBtn').style.display='none';
+  status('t = 0 reset to the start of the video.'); refreshTimeUI(); };
 
 let playing=false, rafPlay=null;
 $('#playBtn').onclick=()=>{
@@ -410,7 +423,7 @@ function render(){
     dctx.strokeRect(lastPos.x-ts/2,lastPos.y-ts/2,ts,ts);
   }
   // HUD
-  $('#tNow').textContent=video.currentTime.toFixed(3);
+  $('#tNow').textContent=(video.currentTime-timeZero).toFixed(3);
   $('#fNow').textContent=curFrame();
   $('#scrub').value=video.currentTime;
 }
@@ -621,7 +634,7 @@ function valueOf(tk,p){                     // returns plotted y in current unit
   if(sel==='y') return (p.y-o.y)*k;
   return Math.hypot(p.x-o.x,p.y-o.y)*k;
 }
-function seriesFor(tk){ return tk.points.slice().sort((a,b)=>a.t-b.t).map(p=>({t:p.t,v:valueOf(tk,p),frame:p.frame})); }
+function seriesFor(tk){ return tk.points.slice().sort((a,b)=>a.t-b.t).map(p=>({t:p.t-timeZero,v:valueOf(tk,p),frame:p.frame})); }
 function linFit(pts){ const n=pts.length; let sx=0,sy=0,sxx=0,sxy=0;
   pts.forEach(p=>{sx+=p.t;sy+=p.v;sxx+=p.t*p.t;sxy+=p.t*p.v;});
   const den=n*sxx-sx*sx; if(Math.abs(den)<1e-9)return null;
@@ -651,21 +664,26 @@ function drawGraph(){
   const padL=52,padR=14,padT=14,padB=36, plotW=W-padL-padR, plotH=H-padT-padB;
 
   // data extents
-  let tmax=0, vmin=0, vmax=0, any=false;
-  tracks.forEach(tk=>seriesFor(tk).forEach(p=>{ any=true; tmax=Math.max(tmax,p.t); vmax=Math.max(vmax,p.v); vmin=Math.min(vmin,p.v); }));
+  let tmax=0, tmin=0, vmin=0, vmax=0, any=false;
+  tracks.forEach(tk=>seriesFor(tk).forEach(p=>{ any=true; tmax=Math.max(tmax,p.t); tmin=Math.min(tmin,p.t); vmax=Math.max(vmax,p.v); vmin=Math.min(vmin,p.v); }));
   tmax=niceMax(Math.max(tmax,0.5));
+  const tLo=tmin<0?-niceMax(-tmin):0;              // allow time before t=0
   const negative=vmin<0;
   const AV=niceMax(Math.max(Math.abs(vmax),Math.abs(vmin),0.5));
   const yTop=AV, yBot=negative?-AV:0;
-  const X=t=>padL+(t/tmax)*plotW;
+  const X=t=>padL+((t-tLo)/(tmax-tLo))*plotW;
   const Y=v=>padT+plotH-((v-yBot)/(yTop-yBot))*plotH;
-  gview={padL,padT,plotW,plotH,tmax,yTop,yBot};
+  gview={padL,padT,plotW,plotH,tLo,tmax,yTop,yBot};
+  const tdec=(tmax-tLo)<2?2:1;
 
   gctx.strokeStyle='#2c3d6b'; gctx.fillStyle='#9fb0d6'; gctx.font='11px -apple-system,sans-serif';
   gctx.textAlign='center'; gctx.textBaseline='top';
-  for(let i=0;i<=5;i++){ const t=tmax*i/5, x=X(t);
-    gctx.globalAlpha=i?0.35:1; gctx.beginPath(); gctx.moveTo(x,padT); gctx.lineTo(x,padT+plotH); gctx.stroke();
-    gctx.globalAlpha=1; gctx.fillText(t.toFixed(t<1?2:1), x, padT+plotH+6); }
+  for(let i=0;i<=5;i++){ const t=tLo+(tmax-tLo)*i/5, x=X(t);
+    gctx.globalAlpha=Math.abs(t)<1e-9?1:0.35; gctx.beginPath(); gctx.moveTo(x,padT); gctx.lineTo(x,padT+plotH); gctx.stroke();
+    gctx.globalAlpha=1; gctx.fillText(t.toFixed(tdec), x, padT+plotH+6); }
+  if(tLo<0){ const x0=X(0); gctx.strokeStyle='#4a5f96'; gctx.lineWidth=1.5;   // emphasize t=0
+    gctx.beginPath(); gctx.moveTo(x0,padT); gctx.lineTo(x0,padT+plotH); gctx.stroke();
+    gctx.lineWidth=1; gctx.strokeStyle='#2c3d6b'; }
   gctx.textAlign='right'; gctx.textBaseline='middle';
   for(let i=0;i<=5;i++){ const v=yBot+(yTop-yBot)*i/5, y=Y(v);
     gctx.globalAlpha=(Math.abs(v)<1e-9)?1:0.35; gctx.beginPath(); gctx.moveTo(padL,y); gctx.lineTo(padL+plotW,y); gctx.stroke();
@@ -783,9 +801,9 @@ function integralOfSelection(){ const s=selectedSeries(); if(s.length<2) return 
   let area=0; for(let i=0;i<s.length-1;i++) area+=0.5*(s[i].v+s[i+1].v)*(s[i+1].t-s[i].t);  // trapezoid
   return {area, t0:s[0].t, t1:s[s.length-1].t}; }
 
-function gXt(t){ return gview.padL+(t/gview.tmax)*gview.plotW; }
+function gXt(t){ return gview.padL+((t-gview.tLo)/(gview.tmax-gview.tLo))*gview.plotW; }
 function gYv(v){ return gview.padT+gview.plotH-((v-gview.yBot)/(gview.yTop-gview.yBot))*gview.plotH; }
-function gInvT(px){ if(!gview) return 0; return clamp((px-gview.padL)/gview.plotW*gview.tmax,0,gview.tmax); }
+function gInvT(px){ if(!gview) return 0; return clamp(gview.tLo+(px-gview.padL)/gview.plotW*(gview.tmax-gview.tLo), gview.tLo, gview.tmax); }
 function hitTestGraph(x,y){ if(!gview) return null; let best=null,bd=15*15;
   activeSeries().forEach(p=>{ const dx=x-gXt(p.t),dy=y-gYv(p.v),d=dx*dx+dy*dy; if(d<bd){bd=d;best=p.frame;} });
   return best; }
@@ -815,7 +833,7 @@ function updateSelUI(){
   if(n===1){ const fr=[...selected][0], tk=activeTk(), p=tk&&tk.points.find(q=>q.frame===fr);
     if(!p){ $('#selInfo').textContent='Selected point is no longer present.'; return; }
     const v=valueOf(tk,p), sl=slopeAtFrame(fr);
-    $('#selInfo').innerHTML=`<b>Point</b> · frame ${fr} · t=${p.t.toFixed(3)} s · ${yl}=${v.toFixed(3)} ${u} · pixel (${p.x.toFixed(0)}, ${p.y.toFixed(0)})`+
+    $('#selInfo').innerHTML=`<b>Point</b> · frame ${fr} · t=${(p.t-timeZero).toFixed(3)} s · ${yl}=${v.toFixed(3)} ${u} · pixel (${p.x.toFixed(0)}, ${p.y.toFixed(0)})`+
       (sl!=null?` · slope≈<b>${sl.toFixed(3)} ${u}/s</b>`:'');
     return; }
   const s=selectedSeries(), fit=linFit(s), ig=integralOfSelection();
@@ -838,7 +856,7 @@ function renderData(){
   $('#emptyMsg').style.display=s.length?'none':'block';
   s.forEach(p=>{ const tr=document.createElement('tr');
     if(selected.has(p.frame)) tr.className='selrow';
-    tr.innerHTML=`<td>${p.frame}</td><td>${p.t.toFixed(3)}</td><td>${p.x.toFixed(0)}</td><td>${p.y.toFixed(0)}</td><td>${valueOf(tk,p).toFixed(3)}</td>`;
+    tr.innerHTML=`<td>${p.frame}</td><td>${(p.t-timeZero).toFixed(3)}</td><td>${p.x.toFixed(0)}</td><td>${p.y.toFixed(0)}</td><td>${valueOf(tk,p).toFixed(3)}</td>`;
     tr.onclick=()=>{ toggleSel(p.frame); selectionChanged(); };
     tb.appendChild(tr); });
 }
@@ -847,7 +865,7 @@ function renderData(){
 $('#exportBtn').onclick=()=>{
   let rows=[['object','frame','time_s','x_px','y_px','value_'+unit(),'plot_'+$('#plotSel').value]];
   tracks.forEach(tk=>tk.points.slice().sort((a,b)=>a.frame-b.frame).forEach(p=>{
-    rows.push([tk.name,p.frame,p.t.toFixed(4),p.x.toFixed(1),p.y.toFixed(1),valueOf(tk,p).toFixed(4),$('#plotSel').value]); }));
+    rows.push([tk.name,p.frame,(p.t-timeZero).toFixed(4),p.x.toFixed(1),p.y.toFixed(1),valueOf(tk,p).toFixed(4),$('#plotSel').value]); }));
   if(rows.length<2){ status('No data to export yet.'); return; }
   const csv=rows.map(r=>r.join(',')).join('\n');
   const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
