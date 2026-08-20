@@ -135,7 +135,7 @@
       <div class="stage" style="margin-top:10px">
         <div class="drop" id="dropMsg"><b>Drop a video here</b><br>or use “Choose video…”. Everything runs in your browser — nothing is uploaded.</div>
         <canvas id="disp"></canvas>
-        <button class="btn secondary small" id="undoBtn" style="position:absolute;top:8px;right:8px;z-index:3;display:none">↶ Undo last tap</button>
+        <button class="btn secondary small" id="undoBtn" style="position:absolute;top:8px;right:8px;z-index:3;display:none">↶ Undo</button>
       </div>
       <div class="rowline" style="margin-top:10px">
         <button class="btn secondary small" id="firstBtn" disabled>⏮</button>
@@ -213,7 +213,8 @@
           </select>
         </label>
         <label><input type="checkbox" id="connectChk" checked> Connect</label>
-        <button class="btn secondary small" id="fitBtn">📈 Best-fit</button>
+        <button class="btn secondary small" id="fitBtn">📈 Best-fit (line)</button>
+        <button class="btn secondary small" id="parabBtn">📐 Parabola (accel)</button>
         <span class="spacer"></span>
         <button class="btn secondary small" id="exportBtn">⬇ CSV</button>
       </div>
@@ -459,7 +460,7 @@ function undoLast(){ if(!undoStack.length) return;
   if(tk) tk.points=snap.points;
   renderTracks(); renderLegend(); updateGraph(); updateUndoBtn();
   if(loaded && snap.recFrame!=null) seekTo(snap.recFrame/fps).then(render); else if(loaded) render();
-  status('Undid last tap.'); }
+  status('Undid last change.'); }
 function updateUndoBtn(){ const b=$('#undoBtn'); if(!b) return;
   b.style.display=loaded?'block':'none'; b.disabled=undoStack.length===0; }
 $('#undoBtn').onclick=undoLast;
@@ -551,6 +552,7 @@ function setTarget(p){
   if(templateMat) templateMat.delete();
   templateMat=g.roi(new cv.Rect(tx,ty,TS,TS)).clone(); g.delete();
   lastPos={x:tx+TS/2,y:ty+TS/2};
+  pushUndo(curFrame());                       // locking a target drops a point — make it undoable
   recordPoint(lastPos); renderTracks(); renderLegend(); updateGraph();
   $('#trackStopBtn').disabled=false;
   $('#autoStatus').textContent='Target locked. Press “Track to end”.';
@@ -572,6 +574,7 @@ $('#trackRunBtn').onclick=async ()=>{
   if(mode!=='auto'){ setMode('auto'); }
   if(!cvReady){ status('OpenCV not ready — use Manual tap.'); return; }
   if(!templateMat){ status('Click the object once to lock the target first.'); return; }
+  pushUndo(curFrame());                        // one undo reverts the whole auto-track run
   autoStop=false; setTracking(true);
   const end=totalFrames();
   let f=curFrame();
@@ -595,10 +598,12 @@ function setTracking(on){ tracking=on;
 
 /* ---------- Graph ---------- */
 const gcanvas=$('#graph'), gctx=gcanvas.getContext('2d');
-let fitShown=false;
+let fitMode='none';   // 'none' | 'line' | 'parabola'
 $('#connectChk').onchange=updateGraph;
 $('#plotSel').onchange=()=>{ updateGraph(); renderData(); };
-$('#fitBtn').onclick=()=>{ fitShown=!fitShown; $('#fitBtn').classList.toggle('active',fitShown); updateGraph(); };
+function refreshFitButtons(){ $('#fitBtn').classList.toggle('active',fitMode==='line'); $('#parabBtn').classList.toggle('active',fitMode==='parabola'); }
+$('#fitBtn').onclick=()=>{ fitMode=(fitMode==='line'?'none':'line'); refreshFitButtons(); updateGraph(); };
+$('#parabBtn').onclick=()=>{ fitMode=(fitMode==='parabola'?'none':'parabola'); refreshFitButtons(); updateGraph(); };
 
 function unit(){ return scaleMPP?'m':'px'; }
 function valueOf(tk,p){                     // returns plotted y in current units
@@ -614,6 +619,17 @@ function linFit(pts){ const n=pts.length; let sx=0,sy=0,sxx=0,sxy=0;
   pts.forEach(p=>{sx+=p.t;sy+=p.v;sxx+=p.t*p.t;sxy+=p.t*p.v;});
   const den=n*sxx-sx*sx; if(Math.abs(den)<1e-9)return null;
   const m=(n*sxy-sx*sy)/den; return {m, b:(sy-m*sx)/n}; }
+function quadFit(pts){ // least squares v = a*t^2 + b*t + c ; needs >=3 pts. accel = 2a
+  const n=pts.length; if(n<3) return null;
+  let S1=0,S2=0,S3=0,S4=0,T0=0,T1=0,T2=0;
+  pts.forEach(p=>{ const t=p.t,v=p.v,t2=t*t; S1+=t;S2+=t2;S3+=t2*t;S4+=t2*t2; T0+=v;T1+=v*t;T2+=v*t2; });
+  const sol=solve3([[n,S1,S2],[S1,S2,S3],[S2,S3,S4]],[T0,T1,T2]);
+  return sol?{c:sol[0],b:sol[1],a:sol[2]}:null; }
+function solve3(M,R){ const A=M.map((row,i)=>row.concat(R[i]));   // Gaussian elimination, partial pivot
+  for(let i=0;i<3;i++){ let piv=i; for(let r=i+1;r<3;r++) if(Math.abs(A[r][i])>Math.abs(A[piv][i])) piv=r;
+    if(Math.abs(A[piv][i])<1e-12) return null; [A[i],A[piv]]=[A[piv],A[i]];
+    for(let r=0;r<3;r++){ if(r===i) continue; const f=A[r][i]/A[i][i]; for(let c=i;c<4;c++) A[r][c]-=f*A[i][c]; } }
+  return [A[0][3]/A[0][0], A[1][3]/A[1][1], A[2][3]/A[2][2]]; }
 function niceMax(v){ if(v<=0)return 1; const p=Math.pow(10,Math.floor(Math.log10(v))); const n=v/p;
   const m=n<=1?1:n<=2?2:n<=5?5:10; return m*p; }
 
@@ -701,24 +717,41 @@ function drawGraph(){
     gctx.strokeStyle='rgba(255,209,102,.6)'; gctx.lineWidth=1; gctx.strokeRect(brush.x0,padT,brush.x1-brush.x0,plotH);
   }
 
-  // best-fit for active track (range-limited when a range is selected)
-  if(fitShown && tracks[activeTrack]){
-    const useSel=selS.length>=2;
-    const s=useSel?selS:seriesFor(tracks[activeTrack]);
-    if(s.length>=2){ const f=linFit(s);
-      if(f){ const col=tracks[activeTrack].color;
-        const ta=useSel?s[0].t:0, tb=useSel?s[s.length-1].t:tmax;
-        gctx.save(); gctx.beginPath(); gctx.rect(padL,padT,plotW,plotH); gctx.clip();
-        gctx.strokeStyle=col; gctx.lineWidth=2.5; gctx.setLineDash([7,5]);
-        gctx.beginPath(); gctx.moveTo(X(ta),Y(f.m*ta+f.b)); gctx.lineTo(X(tb),Y(f.m*tb+f.b)); gctx.stroke();
-        gctx.setLineDash([]); gctx.restore();
-        const sign=f.b>=0?'+':'−';
-        const label=`${yl.toLowerCase()} = ${f.m.toFixed(3)}·t ${sign} ${Math.abs(f.b).toFixed(3)}  (slope ${f.m.toFixed(3)} ${unit()}/s)${useSel?' · range':''}`;
-        gctx.font='bold 12px -apple-system,sans-serif'; gctx.textAlign='left'; gctx.textBaseline='middle';
-        const tw=gctx.measureText(label).width; let lx=padL+10, ly=padT+plotH-12;
-        gctx.fillStyle='rgba(12,20,40,.88)'; gctx.fillRect(lx-6,ly-10,tw+12,20);
-        gctx.strokeStyle=col; gctx.lineWidth=1.5; gctx.strokeRect(lx-6,ly-10,tw+12,20);
-        gctx.fillStyle=col; gctx.fillText(label,lx,ly);
+  // curve fit for active track (line or parabola), range-limited when a range is selected
+  if(fitMode!=='none' && tracks[activeTrack]){
+    const col=tracks[activeTrack].color;
+    // bigger, auto-shrink-to-fit label pinned to the bottom-left of the plot
+    const drawFitLabel=(text)=>{
+      let fs=15; gctx.textAlign='left'; gctx.textBaseline='middle';
+      do{ gctx.font='bold '+fs+'px -apple-system,sans-serif'; if(gctx.measureText(text).width<=plotW-16) break; fs--; } while(fs>10);
+      const tw=gctx.measureText(text).width, h=fs+10, lx=padL+10, ly=padT+plotH-h/2-4;
+      gctx.fillStyle='rgba(12,20,40,.92)'; gctx.fillRect(lx-6,ly-h/2,tw+12,h);
+      gctx.strokeStyle=col; gctx.lineWidth=1.5; gctx.strokeRect(lx-6,ly-h/2,tw+12,h);
+      gctx.fillStyle=col; gctx.fillText(text,lx,ly);
+    };
+    if(fitMode==='line'){
+      const useSel=selS.length>=2, s=useSel?selS:seriesFor(tracks[activeTrack]);
+      if(s.length>=2){ const f=linFit(s);
+        if(f){ const ta=useSel?s[0].t:0, tb=useSel?s[s.length-1].t:tmax;
+          gctx.save(); gctx.beginPath(); gctx.rect(padL,padT,plotW,plotH); gctx.clip();
+          gctx.strokeStyle=col; gctx.lineWidth=2.5; gctx.setLineDash([7,5]);
+          gctx.beginPath(); gctx.moveTo(X(ta),Y(f.m*ta+f.b)); gctx.lineTo(X(tb),Y(f.m*tb+f.b)); gctx.stroke();
+          gctx.setLineDash([]); gctx.restore();
+          const sg=f.b>=0?'+':'−';
+          drawFitLabel(`${yl.toLowerCase()} = ${f.m.toFixed(3)}·t ${sg} ${Math.abs(f.b).toFixed(3)}    slope = ${f.m.toFixed(3)} ${unit()}/s${useSel?'  · range':''}`);
+        }
+      }
+    } else {   // parabola
+      const useSel=selS.length>=3, s=useSel?selS:seriesFor(tracks[activeTrack]);
+      if(s.length>=3){ const f=quadFit(s);
+        if(f){ const ta=useSel?s[0].t:0, tb=useSel?s[s.length-1].t:tmax;
+          gctx.save(); gctx.beginPath(); gctx.rect(padL,padT,plotW,plotH); gctx.clip();
+          gctx.strokeStyle=col; gctx.lineWidth=2.5; gctx.setLineDash([7,5]); gctx.beginPath();
+          const N=60; for(let i=0;i<=N;i++){ const t=ta+(tb-ta)*i/N, v=f.a*t*t+f.b*t+f.c; i?gctx.lineTo(X(t),Y(v)):gctx.moveTo(X(t),Y(v)); }
+          gctx.stroke(); gctx.setLineDash([]); gctx.restore();
+          const sb=f.b>=0?'+':'−', sc=f.c>=0?'+':'−';
+          drawFitLabel(`${yl.toLowerCase()} = ${f.a.toFixed(3)}·t² ${sb} ${Math.abs(f.b).toFixed(3)}·t ${sc} ${Math.abs(f.c).toFixed(3)}    accel = 2a = ${(2*f.a).toFixed(3)} ${unit()}/s²${useSel?'  · range':''}`);
+        }
       }
     }
   }
@@ -733,6 +766,7 @@ function toggleSel(frame){ if(selected.has(frame)) selected.delete(frame); else 
 function clearSelection(){ selected.clear(); selectionChanged(); }
 function selectionChanged(){ drawGraph(); if(loaded) render(); renderData(); updateSelUI(); }
 function deleteSelected(){ const tk=activeTk(); if(!tk||!selected.size) return;
+  pushUndo();                                  // deleting points is undoable
   tk.points=tk.points.filter(p=>!selected.has(p.frame)); selected.clear();
   renderTracks(); renderLegend(); updateGraph(); if(loaded) render(); updateSelUI(); }
 function slopeAtFrame(frame){ const s=activeSeries(); if(s.length<2) return null;
@@ -780,6 +814,7 @@ function updateSelUI(){
     return; }
   const s=selectedSeries(), fit=linFit(s), ig=integralOfSelection();
   let msg=`<b>Range</b> · ${n} pts · Δt=${(s[s.length-1].t-s[0].t).toFixed(3)} s`;
+  if(fitMode==='parabola' && s.length>=3){ const q=quadFit(s); if(q) msg+=` · accel 2a=<b>${(2*q.a).toFixed(3)} ${u}/s²</b>`; }
   if(fit) msg+=` · best-fit slope=<b>${fit.m.toFixed(3)} ${u}/s</b>`;
   if(ig)  msg+=` · ∫(${yl})dt=<b>${ig.area.toFixed(3)} ${u}·s</b>`;
   $('#selInfo').innerHTML=msg;
