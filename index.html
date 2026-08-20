@@ -74,10 +74,10 @@
   .trackchip .cnt{color:var(--muted);font-size:11px}
 
   /* graph */
-  .graphcard{flex:1;display:flex;flex-direction:column;min-height:0}
-  .canvaswrap{flex:1;position:relative;min-height:220px}
+  .graphcard{flex:1 0 auto;display:flex;flex-direction:column;min-height:0}
+  .canvaswrap{flex:1;position:relative;min-height:150px}
   #graph{position:absolute;inset:0;width:100%;height:100%}
-  .toolrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px}
+  .toolrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px;flex-shrink:0}
   .toolrow .spacer{flex:1}
   .toolrow label{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:6px;cursor:pointer}
   select{background:#0c1428;border:1px solid var(--line);color:var(--ink);border-radius:7px;padding:5px 8px;font-size:13px}
@@ -185,15 +185,15 @@
         <button class="btn secondary small" id="addTrackBtn">+ object</button>
       </div>
       <div class="rowline" id="manualHelp" style="margin-top:10px">
-        <span class="readout">Tap the object on each frame — it auto-advances and plots a point.</span>
+        <span class="readout"><b>Double-tap</b> the object on each frame — it auto-advances and plots a point. (Double-tap avoids stray taps from pinch/scroll.)</span>
       </div>
       <div class="rowline" id="autoHelp" style="margin-top:10px;display:none">
         <button class="btn small" id="trackRunBtn" disabled>▶ Track to end</button>
         <button class="btn secondary small" id="trackStopBtn" disabled>■ Stop</button>
-        <span class="readout" id="autoStatus">Click the object once to lock the target, then “Track to end”.</span>
+        <span class="readout" id="autoStatus">Drag a box around the object, then “Track to end”.</span>
       </div>
       <div class="rowline" id="editHelp" style="margin-top:10px;display:none">
-        <span class="readout">Tap a tracked point on the video to select it. On the graph, tap a point or drag across a range. Selected points glow everywhere — use the panel on the right to read slopes, integrate, or delete.</span>
+        <span class="readout"><b>Double-tap</b> a tracked point on the video to select it. On the graph, tap a point or drag across a range. Selected points glow everywhere — use the panel on the right to read slopes, integrate, or delete.</span>
       </div>
       <div class="rowline" style="margin-top:10px">
         <button class="btn secondary small" id="clearTrackBtn">Clear this object’s points</button>
@@ -247,11 +247,11 @@
     <ol>
       <li><b>Load a video</b> of something moving across the frame (a rolling ball, a walking person, a car). It stays on your device — nothing is uploaded.</li>
       <li><b>Set the frame rate</b> (fps) to match your video so times are correct. Most phone video is 30 fps (slow-motion is often 120 or 240).</li>
-      <li><b>Calibrate the scale:</b> click <b>Set scale</b>, then click two points a known real distance apart (a metre stick, a floor tile) and type that distance in metres. Now pixels become metres. Optionally <b>Set origin</b> to choose where 0 m is.</li>
+      <li><b>Calibrate the scale:</b> tap <b>Set scale</b>, then <b>double-tap</b> two points a known real distance apart (a metre stick, a floor tile) and type that distance in metres. Now pixels become metres. Optionally <b>Set origin</b> to choose where 0 m is.</li>
       <li><b>Track the object:</b>
         <ul>
-          <li><b>✋ Manual tap</b> — step through frames and tap the object each time. Best on a touchscreen and always reliable.</li>
-          <li><b>🤖 Auto (OpenCV)</b> — click the object once to lock onto it, then <b>Track to end</b> and OpenCV follows it frame-to-frame.</li>
+          <li><b>✋ Manual tap</b> — step through frames and <b>double-tap</b> the object each time (double-tap so pinch/scroll gestures don’t drop stray points). Best on a touchscreen and always reliable.</li>
+          <li><b>🤖 Auto (OpenCV)</b> — <b>drag a box</b> around the object to lock onto it, then <b>Track to end</b> and OpenCV follows it frame-to-frame. A tighter box around a distinctive part tracks best.</li>
         </ul>
       </li>
       <li>Add more <b>objects</b> to compare several movers, each its own color. Read the <b>distance–time graph</b>, add a <b>best-fit line</b>, and export <b>CSV</b>.</li>
@@ -307,6 +307,7 @@ let origin=null;            // {x,y} image coords
 let mode='manual';
 let pendingAction=null;    // 'cal1'|'cal2'|'origin'|'target'
 let templateMat=null, lastPos=null, autoStop=false, tracking=false;
+let boxSel=null;             // in-progress auto-tracking box (image coords)
 let selected=new Set();      // selected point frames (active track)
 let undoStack=[];            // snapshots for undoing manual taps
 let timeZero=0;              // seconds subtracted from every plotted/recorded time
@@ -417,11 +418,18 @@ function render(){
       if(i===activeTrack && selected.has(p.frame)){ dctx.beginPath(); dctx.arc(p.x,p.y,6.5*S,0,7);
         dctx.strokeStyle='#ffd166'; dctx.lineWidth=2*S; dctx.stroke(); } });
   });
-  // template box (auto)
+  // template box (auto) — sized to the actual template
   if(mode==='auto' && lastPos && templateMat){
-    const ts=templateMat.cols;
+    const tw=templateMat.cols, th=templateMat.rows;
     dctx.strokeStyle=tracks[activeTrack]?.color||'#fff'; dctx.lineWidth=2*S;
-    dctx.strokeRect(lastPos.x-ts/2,lastPos.y-ts/2,ts,ts);
+    dctx.strokeRect(lastPos.x-tw/2,lastPos.y-th/2,tw,th);
+  }
+  // live box-selection rubber-band (auto)
+  if(boxSel){
+    const x=Math.min(boxSel.x0,boxSel.x1), y=Math.min(boxSel.y0,boxSel.y1),
+          w=Math.abs(boxSel.x1-boxSel.x0), h=Math.abs(boxSel.y1-boxSel.y0);
+    dctx.save(); dctx.setLineDash([6*S,4*S]); dctx.lineWidth=2*S;
+    dctx.strokeStyle=tracks[activeTrack]?.color||'#ffd166'; dctx.strokeRect(x,y,w,h); dctx.restore();
   }
   // HUD
   $('#tNow').textContent=(video.currentTime-timeZero).toFixed(3);
@@ -435,8 +443,8 @@ function crosshair(p,color,S){ dctx.strokeStyle=color; dctx.lineWidth=1.5*S;
   dctx.moveTo(p.x,p.y-9*S); dctx.lineTo(p.x,p.y+9*S); dctx.stroke(); }
 
 /* ---------- Calibration / origin ---------- */
-$('#scaleBtn').onclick=()=>{ pendingAction='cal1'; $('#scaleEntry').style.display='none'; status('Click the FIRST point of your known distance.'); };
-$('#originBtn').onclick=()=>{ pendingAction='origin'; status('Click where distance = 0 (the origin).'); };
+$('#scaleBtn').onclick=()=>{ pendingAction='cal1'; $('#scaleEntry').style.display='none'; status('Double-tap the FIRST point of your known distance.'); };
+$('#originBtn').onclick=()=>{ pendingAction='origin'; status('Double-tap where distance = 0 (the origin).'); };
 // After both points are picked, reveal an inline field (iPad Safari blocks prompt() from touch handlers).
 function finishCalibration(){
   if(loaded) render();                              // draw the completed line BEFORE asking for a value
@@ -539,54 +547,83 @@ function recordPoint(p, frame){
   if(existing>=0) tk.points[existing]=pt; else tk.points.push(pt);
 }
 
-/* ---------- Canvas interaction ---------- */
-disp.addEventListener('pointerdown', e=>{
-  if(!loaded) return;
-  const p=toImg(e);
-  if(pendingAction==='cal1'){ calLine={p1:p,p2:p}; pendingAction='cal2'; status('Click the SECOND point.'); render(); return; }
+/* ---------- Canvas interaction: double-tap to place; drag a box in Auto mode ---------- */
+// Placing needs a deliberate DOUBLE-tap so a stray touch or the start of a pinch/pan can't drop a point.
+function handlePlace(p){
+  if(pendingAction==='cal1'){ calLine={p1:p,p2:p}; pendingAction='cal2'; status('Double-tap the SECOND point.'); render(); return; }
   if(pendingAction==='cal2'){ calLine.p2=p; pendingAction=null; finishCalibration(); return; }
   if(pendingAction==='origin'){ origin=p; pendingAction=null; status('Origin set.'); render(); updateGraph(); return; }
   if(mode==='edit'){ const f=hitTestVideo(p); if(f!=null){ toggleSel(f); selectionChanged(); } return; }
-  if(mode==='manual'){
-    const recFrame=curFrame();
-    pushUndo(recFrame);                       // snapshot so a stray tap can be undone
-    recordPoint(p); renderTracks(); renderLegend(); updateGraph();
-    gotoFrame(recFrame+1);                    // auto-advance
+  if(mode==='manual'){ const recFrame=curFrame(); pushUndo(recFrame); recordPoint(p);
+    renderTracks(); renderLegend(); updateGraph(); gotoFrame(recFrame+1); return; }
+}
+let dispDown=null, lastTapT=0, lastTapXY=null, activePtrs=0;
+disp.addEventListener('pointerdown', e=>{
+  if(!loaded) return;
+  activePtrs++;
+  if(activePtrs>1){ dispDown=null; boxSel=null; lastTapT=0; render(); return; }   // 2nd finger (pinch): abort
+  dispDown={ cx:e.clientX, cy:e.clientY, img:toImg(e), moved:false, id:e.pointerId };
+  try{ disp.setPointerCapture(e.pointerId); }catch(_){}
+  if(mode==='auto' && pendingAction===null && cvReady){ const q=dispDown.img; boxSel={x0:q.x,y0:q.y,x1:q.x,y1:q.y}; }
+});
+disp.addEventListener('pointermove', e=>{
+  if(!dispDown || e.pointerId!==dispDown.id || activePtrs>1) return;
+  if(Math.hypot(e.clientX-dispDown.cx, e.clientY-dispDown.cy) > 6) dispDown.moved=true;
+  if(boxSel){ const q=toImg(e); boxSel.x1=q.x; boxSel.y1=q.y; render(); }
+});
+disp.addEventListener('pointerup', e=>{
+  activePtrs=Math.max(0,activePtrs-1);
+  if(!dispDown || e.pointerId!==dispDown.id) return;
+  const info=dispDown; dispDown=null;
+  if(boxSel){                                    // Auto: finalize the tracking box
+    const b=boxSel; boxSel=null;
+    const x=Math.min(b.x0,b.x1), y=Math.min(b.y0,b.y1), w=Math.abs(b.x1-b.x0), h=Math.abs(b.y1-b.y0);
+    if(w>=12 && h>=12) setTemplateRect(x,y,w,h);
+    else { status('Auto mode: drag a box around the object to track it.'); render(); }
     return;
   }
-  if(mode==='auto'){ setTarget(p); render(); }   // click locks/re-locks the target
+  if(info.moved) return;                         // a drag/scroll, not a tap
+  const now=performance.now();
+  const isDouble = (now-lastTapT<350) && lastTapXY && Math.hypot(info.cx-lastTapXY.x, info.cy-lastTapXY.y)<30;
+  if(isDouble){ lastTapT=0; lastTapXY=null; handlePlace(info.img); }
+  else { lastTapT=now; lastTapXY={x:info.cx,y:info.cy}; }
 });
+disp.addEventListener('pointercancel', ()=>{ activePtrs=Math.max(0,activePtrs-1); dispDown=null; boxSel=null; render(); });
 
 /* ---------- OpenCV template tracking ---------- */
 const TS=41, MARGIN=46;
 function resetTemplate(){ if(templateMat){ templateMat.delete(); templateMat=null; } lastPos=null;
-  $('#trackRunBtn').disabled=!loaded; $('#autoStatus').textContent='Click the object once to lock the target, then “Track to end”.'; }
+  $('#trackRunBtn').disabled=!loaded; $('#autoStatus').textContent='Drag a box around the object, then “Track to end”.'; }
 function grayFrame(){
   wctx.drawImage(video,0,0,vw,vh);
   const src=cv.imread(work); const g=new cv.Mat();
   cv.cvtColor(src,g,cv.COLOR_RGBA2GRAY); src.delete(); return g;
 }
-function setTarget(p){
+function setTemplateRect(rx,ry,rw,rh){          // box (image coords) -> tracking template
   if(!cvReady){ status('OpenCV not ready — switch to Manual tap.'); return; }
+  rx=clamp(Math.round(rx),0,vw-8); ry=clamp(Math.round(ry),0,vh-8);
+  rw=Math.max(8,Math.min(Math.round(rw), vw-rx)); rh=Math.max(8,Math.min(Math.round(rh), vh-ry));
   const g=grayFrame();
-  let tx=clamp(Math.round(p.x-TS/2),0,vw-TS), ty=clamp(Math.round(p.y-TS/2),0,vh-TS);
   if(templateMat) templateMat.delete();
-  templateMat=g.roi(new cv.Rect(tx,ty,TS,TS)).clone(); g.delete();
-  lastPos={x:tx+TS/2,y:ty+TS/2};
-  pushUndo(curFrame());                       // locking a target drops a point — make it undoable
+  templateMat=g.roi(new cv.Rect(rx,ry,rw,rh)).clone(); g.delete();
+  lastPos={x:rx+rw/2, y:ry+rh/2};
+  pushUndo(curFrame());                        // locking a target drops a point — make it undoable
   recordPoint(lastPos); renderTracks(); renderLegend(); updateGraph();
   $('#trackStopBtn').disabled=false;
-  $('#autoStatus').textContent='Target locked. Press “Track to end”.';
+  $('#autoStatus').textContent='Target box set ('+rw+'×'+rh+' px). Press “Track to end”.';
+  render();
 }
+function setTarget(p){ setTemplateRect(p.x-TS/2, p.y-TS/2, TS, TS); }   // fixed-size fallback
 function trackStep(){
   const g=grayFrame();
-  let sw=Math.min(TS+2*MARGIN,vw), sh=Math.min(TS+2*MARGIN,vh);
+  const tw=templateMat.cols, th=templateMat.rows;                 // template may be any size (box)
+  let sw=Math.min(tw+2*MARGIN,vw), sh=Math.min(th+2*MARGIN,vh);
   let sx=clamp(Math.round(lastPos.x-sw/2),0,vw-sw), sy=clamp(Math.round(lastPos.y-sh/2),0,vh-sh);
   const roi=g.roi(new cv.Rect(sx,sy,sw,sh));
   const res=new cv.Mat();
   cv.matchTemplate(roi,templateMat,res,cv.TM_CCOEFF_NORMED);
   const mm=cv.minMaxLoc(res);
-  const cx=sx+mm.maxLoc.x+TS/2, cy=sy+mm.maxLoc.y+TS/2;
+  const cx=sx+mm.maxLoc.x+tw/2, cy=sy+mm.maxLoc.y+th/2;
   g.delete(); roi.delete(); res.delete();
   lastPos={x:cx,y:cy};
   return {pos:lastPos, score:mm.maxVal};
