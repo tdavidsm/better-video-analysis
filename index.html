@@ -53,6 +53,10 @@
   .readout b{color:var(--accent)}
   input[type="number"]{width:58px;background:#0c1428;border:1px solid var(--line);color:var(--ink);
     border-radius:7px;padding:5px 7px;font-size:13px}
+  input:focus{outline:2px solid var(--accent);outline-offset:1px}
+  #scaleEntry{border-left:3px solid var(--accent);padding-left:8px;border-radius:4px}
+  @keyframes flashbg{0%{background:rgba(255,209,102,.28)}100%{background:transparent}}
+  #scaleEntry.flash{animation:flashbg .8s ease-out 2}
   label.inline{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:6px}
 
   .modes{display:flex;gap:8px}
@@ -131,6 +135,7 @@
       <div class="stage" style="margin-top:10px">
         <div class="drop" id="dropMsg"><b>Drop a video here</b><br>or use “Choose video…”. Everything runs in your browser — nothing is uploaded.</div>
         <canvas id="disp"></canvas>
+        <button class="btn secondary small" id="undoBtn" style="position:absolute;top:8px;right:8px;z-index:3;display:none">↶ Undo last tap</button>
       </div>
       <div class="rowline" style="margin-top:10px">
         <button class="btn secondary small" id="firstBtn" disabled>⏮</button>
@@ -298,6 +303,7 @@ let mode='manual';
 let pendingAction=null;    // 'cal1'|'cal2'|'origin'|'target'
 let templateMat=null, lastPos=null, autoStop=false, tracking=false;
 let selected=new Set();      // selected point frames (active track)
+let undoStack=[];            // snapshots for undoing manual taps
 let gview=null;              // last graph transform, for hit-testing
 let brush=null, gDown=null;  // graph drag/brush state
 
@@ -323,6 +329,7 @@ function onMeta(){
   ['firstBtn','prevBtn','playBtn','nextBtn','scrub','scaleBtn','originBtn','trackRunBtn'].forEach(id=>{ const el=$('#'+id); if(el) el.disabled=false; });
   $('#scrub').max=duration;
   if(tracks.length===0) addTrack();
+  updateUndoBtn();
   seekTo(0).then(render);
   status('Video loaded ('+vw+'×'+vh+', '+duration.toFixed(2)+'s). Calibrate the scale, then track.');
 }
@@ -410,11 +417,13 @@ $('#scaleBtn').onclick=()=>{ pendingAction='cal1'; $('#scaleEntry').style.displa
 $('#originBtn').onclick=()=>{ pendingAction='origin'; status('Click where distance = 0 (the origin).'); };
 // After both points are picked, reveal an inline field (iPad Safari blocks prompt() from touch handlers).
 function finishCalibration(){
+  if(loaded) render();                              // draw the completed line BEFORE asking for a value
   const px=Math.hypot(calLine.p2.x-calLine.p1.x, calLine.p2.y-calLine.p1.y);
   $('#scalePxLbl').textContent='Line = '+px.toFixed(0)+' px. Real distance between the two points:';
-  $('#scaleEntry').style.display='flex';
+  const entry=$('#scaleEntry'); entry.style.display='flex';
+  entry.classList.remove('flash'); void entry.offsetWidth; entry.classList.add('flash');   // restart flash
   const inp=$('#scaleMeters'); try{ inp.focus(); inp.select(); }catch(_){}
-  status('Type the real distance and tap “Set scale”.');
+  status('Line placed — type the real distance and tap “Set scale”.');
 }
 $('#scaleApplyBtn').onclick=()=>{
   if(!calLine){ $('#scaleEntry').style.display='none'; return; }
@@ -430,18 +439,36 @@ $('#scaleCancelBtn').onclick=()=>{ calLine=null; $('#scaleEntry').style.display=
 $('#scaleMeters').addEventListener('keydown', e=>{ if(e.key==='Enter') $('#scaleApplyBtn').click(); });
 
 /* ---------- Tracks ---------- */
+function nextObjectNumber(){ const used=new Set(tracks.map(t=>t.name)); let n=1; while(used.has('Object '+n)) n++; return n; }
 function addTrack(){
-  const color=PALETTE[tracks.length%PALETTE.length];
-  tracks.push({id:Date.now()+Math.random(), name:'Object '+(tracks.length+1), color, points:[]});
-  activeTrack=tracks.length-1; selected.clear(); renderTracks(); renderLegend(); updateGraph(); updateSelUI();
+  const n=nextObjectNumber();                     // fill the lowest free "Object N" slot
+  const color=PALETTE[(n-1)%PALETTE.length];       // color follows the number, so it stays distinct
+  tracks.push({id:Date.now()+Math.random(), name:'Object '+n, color, points:[]});
+  activeTrack=tracks.length-1; selected.clear(); undoStack=[]; renderTracks(); renderLegend(); updateGraph(); updateSelUI(); updateUndoBtn();
 }
 $('#addTrackBtn').onclick=addTrack;
+
+/* ---------- Undo (manual taps) ---------- */
+function pushUndo(recFrame){ const tk=tracks[activeTrack]; if(!tk) return;
+  undoStack.push({trackId:tk.id, points:tk.points.map(p=>({...p})), recFrame});
+  if(undoStack.length>300) undoStack.shift();
+  updateUndoBtn(); }
+function undoLast(){ if(!undoStack.length) return;
+  const snap=undoStack.pop();
+  const tk=tracks.find(t=>t.id===snap.trackId);
+  if(tk) tk.points=snap.points;
+  renderTracks(); renderLegend(); updateGraph(); updateUndoBtn();
+  if(loaded && snap.recFrame!=null) seekTo(snap.recFrame/fps).then(render); else if(loaded) render();
+  status('Undid last tap.'); }
+function updateUndoBtn(){ const b=$('#undoBtn'); if(!b) return;
+  b.style.display=loaded?'block':'none'; b.disabled=undoStack.length===0; }
+$('#undoBtn').onclick=undoLast;
 function renderTracks(){
   const c=$('#tracks'); c.innerHTML='';
   tracks.forEach((tk,i)=>{
     const el=document.createElement('div'); el.className='trackchip'+(i===activeTrack?' sel':'');
     el.innerHTML=`<span class="sw" style="background:${tk.color}"></span><span class="n">${tk.name}</span><span class="cnt">(${tk.points.length})</span>`;
-    el.onclick=()=>{ activeTrack=i; selected.clear(); resetTemplate(); renderTracks(); renderLegend(); updateGraph(); if(loaded)render(); updateSelUI(); };
+    el.onclick=()=>{ activeTrack=i; selected.clear(); undoStack=[]; resetTemplate(); renderTracks(); renderLegend(); updateGraph(); if(loaded)render(); updateSelUI(); updateUndoBtn(); };
     c.appendChild(el);
   });
 }
@@ -462,7 +489,7 @@ $('#delTrackBtn').onclick=()=>{ armConfirm($('#delTrackBtn'), ()=>{
   selected.clear();
   if(tracks.length<=1){ tracks[0].points=[]; resetTemplate(); afterData(); return; }
   tracks.splice(activeTrack,1); activeTrack=0; resetTemplate(); afterData(); }); };
-function afterData(){ renderTracks(); renderLegend(); updateGraph(); if(loaded)render(); updateSelUI(); }
+function afterData(){ undoStack=[]; renderTracks(); renderLegend(); updateGraph(); if(loaded)render(); updateSelUI(); updateUndoBtn(); }
 
 /* ---------- Mode ---------- */
 $('#modeManual').onclick=()=>setMode('manual');
@@ -499,8 +526,10 @@ disp.addEventListener('pointerdown', e=>{
   if(pendingAction==='origin'){ origin=p; pendingAction=null; status('Origin set.'); render(); updateGraph(); return; }
   if(mode==='edit'){ const f=hitTestVideo(p); if(f!=null){ toggleSel(f); selectionChanged(); } return; }
   if(mode==='manual'){
+    const recFrame=curFrame();
+    pushUndo(recFrame);                       // snapshot so a stray tap can be undone
     recordPoint(p); renderTracks(); renderLegend(); updateGraph();
-    gotoFrame(curFrame()+1);                 // auto-advance
+    gotoFrame(recFrame+1);                    // auto-advance
     return;
   }
   if(mode==='auto'){ setTarget(p); render(); }   // click locks/re-locks the target
