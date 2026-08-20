@@ -682,8 +682,7 @@ function drawGraph(){
     const s=seriesFor(tk); if(!s.length) return;
     if($('#connectChk').checked && s.length>1){ gctx.strokeStyle=tk.color; gctx.lineWidth=2; gctx.globalAlpha=.7;
       gctx.beginPath(); s.forEach((p,i)=>{ const x=X(p.t),y=Y(p.v); i?gctx.lineTo(x,y):gctx.moveTo(x,y); }); gctx.stroke(); gctx.globalAlpha=1; }
-    s.forEach(p=>{ gctx.beginPath(); gctx.arc(X(p.t),Y(p.v),4.5,0,7); gctx.fillStyle=tk.color; gctx.fill();
-      gctx.lineWidth=1.5; gctx.strokeStyle='#0f1830'; gctx.stroke(); });
+    s.forEach(p=>{ gctx.beginPath(); gctx.arc(X(p.t),Y(p.v),4,0,7); gctx.fillStyle=tk.color; gctx.fill(); });
   });
 
   // ---- selection overlays (active track) ----
