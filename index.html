@@ -193,6 +193,11 @@
         <label class="inline">Speed <select id="reachSel"><option value="normal">normal</option><option value="far">fast</option><option value="vfar">very fast</option></select></label>
         <span class="readout" id="autoStatus">Drag a box around the object, then “Track to end”.</span>
       </div>
+      <div class="rowline" id="confirmRow" style="margin-top:8px;display:none">
+        <span class="readout" id="confirmMsg" style="color:var(--accent)">Weak match — is the dashed box still the object?</span>
+        <button class="btn small" id="confirmContinueBtn">▶ Continue</button>
+        <button class="btn secondary small" id="confirmStopBtn">■ Lost — stop</button>
+      </div>
       <div class="rowline" id="editHelp" style="margin-top:10px;display:none">
         <span class="readout"><b>Double-tap</b> a tracked point on the video to select it. On the graph, tap a point or drag across a range. Selected points glow everywhere — use the panel on the right to read slopes, integrate, or delete.</span>
       </div>
@@ -312,6 +317,7 @@ let pendingAction=null;    // 'cal1'|'cal2'|'origin'|'target'
 let templateMat=null, lastPos=null, autoStop=false, tracking=false;
 let boxSel=null;             // in-progress auto-tracking box (image coords)
 let trackVel={x:0,y:0}, trackMiss=0, tmplW=0, tmplH=0;   // motion model + full-res template size
+let confirmResolve=null;     // pending "is this still the object?" prompt
 let selected=new Set();      // selected point frames (active track)
 let undoStack=[];            // snapshots for undoing manual taps
 let timeZero=0;              // seconds subtracted from every plotted/recorded time
@@ -427,8 +433,11 @@ function render(){
   });
   // template box (auto) — sized to the actual template
   if(mode==='auto' && lastPos && templateMat){
-    dctx.strokeStyle=tracks[activeTrack]?.color||'#fff'; dctx.lineWidth=2*S;
+    dctx.lineWidth=2*S;
+    if(confirmResolve){ dctx.setLineDash([8*S,5*S]); dctx.strokeStyle='#ffd166'; }   // "is this still it?"
+    else dctx.strokeStyle=tracks[activeTrack]?.color||'#fff';
     dctx.strokeRect(lastPos.x-tmplW/2,lastPos.y-tmplH/2,tmplW,tmplH);
+    dctx.setLineDash([]);
   }
   // live box-selection rubber-band (auto)
   if(boxSel){
@@ -598,7 +607,7 @@ disp.addEventListener('pointercancel', ()=>{ activePtrs=Math.max(0,activePtrs-1)
 
 /* ---------- OpenCV template tracking ---------- */
 const TS=41;
-const BASE_MARGIN=28, MAX_MARGIN=260, MATCH_GATE=0.30, MAX_MISS=12;   // proc-space search px + confidence
+const BASE_MARGIN=28, MAX_MARGIN=260, MATCH_GATE=0.30, MISS_SOFT=4;   // proc-space search px + confidence
 function resetTemplate(){ if(templateMat){ templateMat.delete(); templateMat=null; } lastPos=null; trackVel={x:0,y:0}; trackMiss=0;
   $('#trackRunBtn').disabled=!loaded; $('#autoStatus').textContent='Drag a box around the object, then “Track to end”.'; }
 function grayFrame(){
@@ -646,14 +655,19 @@ function trackStep(){
   const res=new cv.Mat();
   cv.matchTemplate(roi,templateMat,res,cv.TM_CCOEFF_NORMED);
   const mm=cv.minMaxLoc(res), score=mm.maxVal;
-  let mcx,mcy,matched;
-  if(score>=MATCH_GATE){ mcx=sx+mm.maxLoc.x+tw/2; mcy=sy+mm.maxLoc.y+th/2; matched=true; trackMiss=0; }
-  else { mcx=pcx; mcy=pcy; matched=false; trackMiss++; }         // weak match -> coast on the motion model
+  let mcx=pcx, mcy=pcy;
+  if(score>=MATCH_GATE){ mcx=sx+mm.maxLoc.x+tw/2; mcy=sy+mm.maxLoc.y+th/2; }
+  // Sanity check: real tracking is smooth, so a match that teleports far from the motion
+  // prediction is almost always a false lock onto a look-alike (happens when the object leaves view).
+  const jump=Math.hypot(mcx-pcx, mcy-pcy);
+  const maxJump=Math.max(14, speed*1.3) + reachExtra()*0.4;
+  const good = (score>=MATCH_GATE) && (jump<=maxJump);
+  if(!good){ mcx=pcx; mcy=pcy; }                                  // reject: coast on the motion model instead
   g.delete(); roi.delete(); res.delete();
   let fx=clamp(mcx/s, tmplW/2, vw-tmplW/2), fy=clamp(mcy/s, tmplH/2, vh-tmplH/2);
-  if(matched){ trackVel={x:0.5*trackVel.x+0.5*(fx-lastPos.x), y:0.5*trackVel.y+0.5*(fy-lastPos.y)}; }  // smoothed
+  if(good){ trackVel={x:0.5*trackVel.x+0.5*(fx-lastPos.x), y:0.5*trackVel.y+0.5*(fy-lastPos.y)}; }  // smoothed
   lastPos={x:fx,y:fy};
-  return {pos:lastPos, score, matched};
+  return {pos:lastPos, score, good};
 }
 $('#trackRunBtn').onclick=async ()=>{
   if(mode!=='auto'){ setMode('auto'); }
@@ -662,23 +676,49 @@ $('#trackRunBtn').onclick=async ()=>{
   pushUndo(curFrame());                        // one undo reverts the whole auto-track run
   autoStop=false; trackMiss=0; setTracking(true);
   const end=totalFrames();
-  let f=curFrame(), lost=false;
+  let f=curFrame(), lastGood=f, lastGoodPos={...lastPos}, lost=false;
   while(f<end && !autoStop){
     f++;
     await seekTo(f/fps);
     const r=trackStep();
     recordPoint(r.pos,f);
     render(); renderTracks(); renderLegend(); updateGraph();
-    $('#autoStatus').textContent=(r.matched?'Tracking':'Coasting (weak match)')+' … frame '+f+'/'+end+' · match '+r.score.toFixed(2);
-    if(trackMiss>=MAX_MISS){ lost=true; break; }
+    if(r.good){
+      trackMiss=0; lastGood=f; lastGoodPos={...r.pos};
+      $('#autoStatus').textContent='Tracking… frame '+f+'/'+end+' · match '+r.score.toFixed(2);
+    } else {
+      trackMiss++;
+      $('#autoStatus').textContent='Weak match at frame '+f+' · '+r.score.toFixed(2)+' — checking…';
+      if(trackMiss>=MISS_SOFT){                  // several bad frames in a row → ask before continuing
+        const dec=await confirmContinue(f);
+        if(dec==='stop' || autoStop){ lost=true; break; }
+        trackMiss=0; lastGood=f; lastGoodPos={...r.pos};   // user vouched for this point
+      }
+    }
     await new Promise(res=>setTimeout(res,0));
   }
-  setTracking(false);
-  $('#autoStatus').textContent = lost
-    ? 'Lost it (weak matches). Scrub back to where it’s clear, draw a tighter box on a distinctive part, bump Speed, and Track again.'
-    : 'Done. Re-draw the box to re-lock, or scrub back and Track again.';
+  setTracking(false); endConfirm(null);
+  if(lost){
+    const tk=tracks[activeTrack];
+    if(tk) tk.points=tk.points.filter(p=>p.frame<=lastGood);   // drop the spurious tail
+    lastPos={...lastGoodPos}; trackVel={x:0,y:0}; trackMiss=0;
+    renderTracks(); renderLegend(); updateGraph(); if(loaded) render();
+    $('#autoStatus').textContent='Object lost after frame '+lastGood+' — extra points removed. Scrub to where it’s clear, draw a fresh box, and Track again.';
+  } else {
+    $('#autoStatus').textContent='Done. Re-draw the box to re-lock, or scrub back and Track again.';
+  }
 };
-$('#trackStopBtn').onclick=()=>{ autoStop=true; };
+$('#trackStopBtn').onclick=()=>{ autoStop=true; endConfirm('stop'); };
+/* pause the run and ask whether the (dashed) suggested point is still the object */
+function confirmContinue(f){
+  return new Promise(res=>{ confirmResolve=res;
+    $('#confirmMsg').textContent='Weak match near frame '+f+'. Is the dashed box still the object?';
+    $('#confirmRow').style.display='flex'; render(); });
+}
+function endConfirm(val){ $('#confirmRow').style.display='none';
+  if(confirmResolve){ const r=confirmResolve; confirmResolve=null; r(val||'stop'); } if(loaded) render(); }
+$('#confirmContinueBtn').onclick=()=>endConfirm('continue');
+$('#confirmStopBtn').onclick=()=>endConfirm('stop');
 function setTracking(on){ tracking=on;
   $('#trackRunBtn').disabled=on; $('#trackStopBtn').disabled=!on;
   ['prevBtn','nextBtn','playBtn','firstBtn','scrub'].forEach(id=>$('#'+id).disabled=on);
