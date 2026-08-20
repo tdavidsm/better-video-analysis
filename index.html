@@ -598,7 +598,7 @@ disp.addEventListener('pointercancel', ()=>{ activePtrs=Math.max(0,activePtrs-1)
 
 /* ---------- OpenCV template tracking ---------- */
 const TS=41;
-const BASE_MARGIN=28, MAX_MARGIN=150, MATCH_GATE=0.30, MAX_MISS=10;   // proc-space search px + confidence
+const BASE_MARGIN=28, MAX_MARGIN=260, MATCH_GATE=0.30, MAX_MISS=12;   // proc-space search px + confidence
 function resetTemplate(){ if(templateMat){ templateMat.delete(); templateMat=null; } lastPos=null; trackVel={x:0,y:0}; trackMiss=0;
   $('#trackRunBtn').disabled=!loaded; $('#autoStatus').textContent='Drag a box around the object, then “Track to end”.'; }
 function grayFrame(){
@@ -637,7 +637,9 @@ function trackStep(){
   // constant-velocity prediction (proc space): a car keeps going where it was going
   const lpx=lastPos.x*s, lpy=lastPos.y*s, vx=trackVel.x*s, vy=trackVel.y*s;
   const pcx=lpx+vx, pcy=lpy+vy, speed=Math.hypot(vx,vy);
-  const margin=Math.min(MAX_MARGIN, BASE_MARGIN + reachExtra() + speed*1.6);   // window grows with speed
+  // base window scales with frame size (bigger frames = objects cross more px per frame), then grows with speed
+  const baseM=Math.max(BASE_MARGIN, Math.round(Math.max(pw,ph)*0.11)) + reachExtra();
+  const margin=Math.min(MAX_MARGIN, baseM + speed*1.6);
   let sw=Math.min(Math.round(tw+2*margin),pw), sh=Math.min(Math.round(th+2*margin),ph);
   let sx=clamp(Math.round(pcx-sw/2),0,pw-sw), sy=clamp(Math.round(pcy-sh/2),0,ph-sh);
   const roi=g.roi(new cv.Rect(sx,sy,sw,sh));
