@@ -216,6 +216,7 @@
           </select>
         </label>
         <label><input type="checkbox" id="connectChk" checked> Connect</label>
+        <label><input type="checkbox" id="startZeroChk" checked> Start at t=0</label>
         <button class="btn secondary small" id="fitBtn">📈 Best-fit (line)</button>
         <button class="btn secondary small" id="parabBtn">📐 Parabola (accel)</button>
         <span class="spacer"></span>
@@ -620,6 +621,7 @@ function setTracking(on){ tracking=on;
 const gcanvas=$('#graph'), gctx=gcanvas.getContext('2d');
 let fitMode='none';   // 'none' | 'line' | 'parabola'
 $('#connectChk').onchange=updateGraph;
+$('#startZeroChk').onchange=updateGraph;
 $('#plotSel').onchange=()=>{ updateGraph(); renderData(); };
 function refreshFitButtons(){ $('#fitBtn').classList.toggle('active',fitMode==='line'); $('#parabBtn').classList.toggle('active',fitMode==='parabola'); }
 $('#fitBtn').onclick=()=>{ fitMode=(fitMode==='line'?'none':'line'); refreshFitButtons(); updateGraph(); };
@@ -667,7 +669,7 @@ function drawGraph(){
   let tmax=0, tmin=0, vmin=0, vmax=0, any=false;
   tracks.forEach(tk=>seriesFor(tk).forEach(p=>{ any=true; tmax=Math.max(tmax,p.t); tmin=Math.min(tmin,p.t); vmax=Math.max(vmax,p.v); vmin=Math.min(vmin,p.v); }));
   tmax=niceMax(Math.max(tmax,0.5));
-  const tLo=tmin<0?-niceMax(-tmin):0;              // allow time before t=0
+  const tLo=(tmin<0 && !$('#startZeroChk').checked)?-niceMax(-tmin):0;   // "Start at t=0" pins the left edge to 0
   const negative=vmin<0;
   const AV=niceMax(Math.max(Math.abs(vmax),Math.abs(vmin),0.5));
   const yTop=AV, yBot=negative?-AV:0;
