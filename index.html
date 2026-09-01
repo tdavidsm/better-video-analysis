@@ -212,13 +212,13 @@
   <!-- RIGHT: graph -->
   <section class="pane right">
     <div class="card graphcard">
-      <h2>Motion graph — points plot as you track</h2>
-      <div class="canvaswrap"><canvas id="graph"></canvas></div>
+      <h2>Graph 1</h2>
+      <div class="canvaswrap"><canvas id="graph1"></canvas></div>
       <div class="toolrow">
         <label>Plot:
-          <select id="plotSel">
+          <select id="plotSel1">
             <optgroup label="Position">
-              <option value="dist">Distance from origin</option>
+              <option value="dist" selected>Distance from origin</option>
               <option value="x">X position</option>
               <option value="y">Y position</option>
             </optgroup>
@@ -234,10 +234,37 @@
             </optgroup>
           </select>
         </label>
+        <button class="btn secondary small" id="fitBtn1">📈 Best-fit</button>
+        <button class="btn secondary small" id="parabBtn1">📐 Parabola</button>
         <label><input type="checkbox" id="connectChk" checked> Connect</label>
         <label><input type="checkbox" id="startZeroChk" checked> Start at t=0</label>
-        <button class="btn secondary small" id="fitBtn">📈 Best-fit (line)</button>
-        <button class="btn secondary small" id="parabBtn">📐 Parabola (accel)</button>
+      </div>
+    </div>
+    <div class="card graphcard">
+      <h2>Graph 2 — compare a second quantity</h2>
+      <div class="canvaswrap"><canvas id="graph2"></canvas></div>
+      <div class="toolrow">
+        <label>Plot:
+          <select id="plotSel2">
+            <optgroup label="Position">
+              <option value="dist">Distance from origin</option>
+              <option value="x">X position</option>
+              <option value="y">Y position</option>
+            </optgroup>
+            <optgroup label="Velocity">
+              <option value="speed" selected>Speed |v|</option>
+              <option value="vx">Velocity x</option>
+              <option value="vy">Velocity y</option>
+            </optgroup>
+            <optgroup label="Acceleration">
+              <option value="accel">Acceleration |a|</option>
+              <option value="ax">Acceleration x</option>
+              <option value="ay">Acceleration y</option>
+            </optgroup>
+          </select>
+        </label>
+        <button class="btn secondary small" id="fitBtn2">📈 Best-fit</button>
+        <button class="btn secondary small" id="parabBtn2">📐 Parabola</button>
         <span class="spacer"></span>
         <button class="btn secondary small" id="exportBtn">⬇ CSV</button>
       </div>
@@ -253,7 +280,7 @@
     <div class="card"><h2>Objects</h2><div class="legend" id="legend"></div></div>
     <div class="card tablecard">
       <h2>Data — selected object</h2>
-      <table><thead><tr><th>frame</th><th>t (s)</th><th>x (px)</th><th>y (px)</th><th id="valHead">value</th></tr></thead>
+      <table><thead><tr><th>frame</th><th>t (s)</th><th>x (px)</th><th>y (px)</th><th id="valHead1">g1</th><th id="valHead2">g2</th></tr></thead>
         <tbody id="dataBody"></tbody></table>
       <div class="empty" id="emptyMsg">No points yet.</div>
     </div>
@@ -334,8 +361,7 @@ let confirmResolve=null;     // pending "is this still the object?" prompt
 let selected=new Set();      // selected point frames (active track)
 let undoStack=[];            // snapshots for undoing manual taps
 let timeZero=0;              // seconds subtracted from every plotted/recorded time
-let gview=null;              // last graph transform, for hit-testing
-let brush=null, gDown=null;  // graph drag/brush state
+let gDrag=null;              // in-progress graph drag {plot,x,y,moved}; brush + gview live per-plot
 
 /* ---------- File load ---------- */
 $('#uploadBtn').onclick=()=>$('#fileInput').click();
@@ -767,32 +793,37 @@ function setTracking(on){ tracking=on;
 }
 
 /* ---------- Graph ---------- */
-const gcanvas=$('#graph'), gctx=gcanvas.getContext('2d');
-let fitMode='none';   // 'none' | 'line' | 'parabola'
-$('#connectChk').onchange=updateGraph;
-$('#startZeroChk').onchange=updateGraph;
-$('#plotSel').onchange=()=>{ updateGraph(); renderData(); };
-function refreshFitButtons(){ $('#fitBtn').classList.toggle('active',fitMode==='line'); $('#parabBtn').classList.toggle('active',fitMode==='parabola'); }
-$('#fitBtn').onclick=()=>{ fitMode=(fitMode==='line'?'none':'line'); refreshFitButtons(); updateGraph(); };
-$('#parabBtn').onclick=()=>{ fitMode=(fitMode==='parabola'?'none':'parabola'); refreshFitButtons(); updateGraph(); };
+function mkPlot(cId,sId,fId,pId){ const canvas=$('#'+cId);
+  return { canvas, ctx:canvas.getContext('2d'), sel:$('#'+sId).value, fitMode:'none', gview:null, brush:null,
+           selEl:$('#'+sId), fitBtn:$('#'+fId), parabBtn:$('#'+pId) }; }
+const PLOTS=[ mkPlot('graph1','plotSel1','fitBtn1','parabBtn1'),
+              mkPlot('graph2','plotSel2','fitBtn2','parabBtn2') ];
+let focusedPlot=PLOTS[0];   // which graph the selection panel/table analysis reports for
+function refreshFitButtons(pl){ pl.fitBtn.classList.toggle('active',pl.fitMode==='line'); pl.parabBtn.classList.toggle('active',pl.fitMode==='parabola'); }
+PLOTS.forEach(pl=>{
+  pl.selEl.onchange=()=>{ pl.sel=pl.selEl.value; focusedPlot=pl; updateGraph(); };
+  pl.fitBtn.onclick=()=>{ pl.fitMode=(pl.fitMode==='line'?'none':'line'); refreshFitButtons(pl); focusedPlot=pl; drawAllGraphs(); updateSelUI(); };
+  pl.parabBtn.onclick=()=>{ pl.fitMode=(pl.fitMode==='parabola'?'none':'parabola'); refreshFitButtons(pl); focusedPlot=pl; drawAllGraphs(); updateSelUI(); };
+});
+$('#connectChk').onchange=drawAllGraphs;
+$('#startZeroChk').onchange=drawAllGraphs;
 
 function unit(){ return scaleMPP?'m':'px'; }
-function plotSel(){ return $('#plotSel').value; }
 function isVel(s){ return s==='speed'||s==='vx'||s==='vy'; }
 function isAcc(s){ return s==='accel'||s==='ax'||s==='ay'; }
-function plotUnit(){ const s=plotSel(),u=unit(); return isAcc(s)?u+'/s²':isVel(s)?u+'/s':u; }
+function plotUnit(sel){ const u=unit(); return isAcc(sel)?u+'/s²':isVel(sel)?u+'/s':u; }
 const PLOT_NAME={dist:'Distance from origin',x:'X position',y:'Y position',speed:'Speed |v|',vx:'Velocity x',vy:'Velocity y',accel:'Acceleration |a|',ax:'Acceleration x',ay:'Acceleration y'};
 const PLOT_SHORT={dist:'dist',x:'x',y:'y',speed:'|v|',vx:'vx',vy:'vy',accel:'|a|',ax:'ax',ay:'ay'};
-function plotLabel(){ return (PLOT_NAME[plotSel()]||'Value')+' ('+plotUnit()+')'; }
-function plotShort(){ return PLOT_SHORT[plotSel()]||'val'; }
+function plotLabel(sel){ return (PLOT_NAME[sel]||'Value')+' ('+plotUnit(sel)+')'; }
+function plotShort(sel){ return PLOT_SHORT[sel]||'val'; }
 // central-difference derivative of samples y[] at times t[]
 function deriv(y,t){ const n=y.length, d=new Array(n).fill(0);
   for(let i=0;i<n && n>=2;i++){ const a=i===0?0:i-1, b=i===n-1?n-1:i+1, dt=t[b]-t[a];
     d[i]=Math.abs(dt)>1e-9?(y[b]-y[a])/dt:0; }
   return d; }
-function seriesFor(tk){                       // {t, v, frame} for the current plot quantity
+function seriesFor(tk, sel){                   // {t, v, frame} for a plot quantity
   const pts=tk.points.slice().sort((a,b)=>a.t-b.t);
-  const s=plotSel(), k=scaleMPP||1;
+  const s=sel||focusedPlot.sel, k=scaleMPP||1;
   const o=origin||(pts.length?pts[0]:{x:0,y:0});
   const t=pts.map(p=>p.t-timeZero);
   const ux=pts.map(p=>(p.x-o.x)*k), uy=pts.map(p=>(p.y-o.y)*k);
@@ -810,7 +841,7 @@ function seriesFor(tk){                       // {t, v, frame} for the current p
   }
   return pts.map((p,i)=>({t:t[i], v:val[i], frame:p.frame}));
 }
-function valueAtFrame(tk,frame){ const e=seriesFor(tk).find(p=>p.frame===frame); return e?e.v:0; }
+function valueAtFrame(tk,frame,sel){ const e=seriesFor(tk,sel).find(p=>p.frame===frame); return e?e.v:0; }
 function linFit(pts){ const n=pts.length; let sx=0,sy=0,sxx=0,sxy=0;
   pts.forEach(p=>{sx+=p.t;sy+=p.v;sxx+=p.t*p.t;sxy+=p.t*p.v;});
   const den=n*sxx-sx*sx; if(Math.abs(den)<1e-9)return null;
@@ -829,19 +860,21 @@ function solve3(M,R){ const A=M.map((row,i)=>row.concat(R[i]));   // Gaussian el
 function niceMax(v){ if(v<=0)return 1; const p=Math.pow(10,Math.floor(Math.log10(v))); const n=v/p;
   const m=n<=1?1:n<=2?2:n<=5?5:10; return m*p; }
 
-function updateGraph(){ drawGraph(); renderData(); }
-function drawGraph(){
-  const wrap=gcanvas.parentElement, dpr=window.devicePixelRatio||1;
+function drawAllGraphs(){ PLOTS.forEach(drawGraph); }
+function updateGraph(){ drawAllGraphs(); renderData(); }
+function drawGraph(plot){
+  const canvas=plot.canvas, ctx=plot.ctx, sel=plot.sel;
+  const wrap=canvas.parentElement, dpr=window.devicePixelRatio||1;
   const bw=Math.round(wrap.clientWidth*dpr), bh=Math.round(wrap.clientHeight*dpr);
-  if(gcanvas.width!==bw||gcanvas.height!==bh){ gcanvas.width=bw; gcanvas.height=bh; }
-  gctx.setTransform(dpr,0,0,dpr,0,0);
-  const W=gcanvas.clientWidth,H=gcanvas.clientHeight;
-  gctx.clearRect(0,0,W,H);
+  if(canvas.width!==bw||canvas.height!==bh){ canvas.width=bw; canvas.height=bh; }
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  const W=canvas.clientWidth,H=canvas.clientHeight;
+  ctx.clearRect(0,0,W,H);
   const padL=52,padR=14,padT=14,padB=36, plotW=W-padL-padR, plotH=H-padT-padB;
 
   // data extents
   let tmax=0, tmin=0, vmin=0, vmax=0, any=false;
-  tracks.forEach(tk=>seriesFor(tk).forEach(p=>{ any=true; tmax=Math.max(tmax,p.t); tmin=Math.min(tmin,p.t); vmax=Math.max(vmax,p.v); vmin=Math.min(vmin,p.v); }));
+  tracks.forEach(tk=>seriesFor(tk,sel).forEach(p=>{ any=true; tmax=Math.max(tmax,p.t); tmin=Math.min(tmin,p.t); vmax=Math.max(vmax,p.v); vmin=Math.min(vmin,p.v); }));
   tmax=niceMax(Math.max(tmax,0.5));
   const tLo=(tmin<0 && !$('#startZeroChk').checked)?-niceMax(-tmin):0;   // "Start at t=0" pins the left edge to 0
   const negative=vmin<0;
@@ -849,171 +882,175 @@ function drawGraph(){
   const yTop=AV, yBot=negative?-AV:0;
   const X=t=>padL+((t-tLo)/(tmax-tLo))*plotW;
   const Y=v=>padT+plotH-((v-yBot)/(yTop-yBot))*plotH;
-  gview={padL,padT,plotW,plotH,tLo,tmax,yTop,yBot};
+  plot.gview={padL,padT,plotW,plotH,tLo,tmax,yTop,yBot};
   const tdec=(tmax-tLo)<2?2:1;
 
-  gctx.strokeStyle='#2c3d6b'; gctx.fillStyle='#9fb0d6'; gctx.font='11px -apple-system,sans-serif';
-  gctx.textAlign='center'; gctx.textBaseline='top';
+  ctx.strokeStyle='#2c3d6b'; ctx.fillStyle='#9fb0d6'; ctx.font='11px -apple-system,sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='top';
   for(let i=0;i<=5;i++){ const t=tLo+(tmax-tLo)*i/5, x=X(t);
-    gctx.globalAlpha=Math.abs(t)<1e-9?1:0.35; gctx.beginPath(); gctx.moveTo(x,padT); gctx.lineTo(x,padT+plotH); gctx.stroke();
-    gctx.globalAlpha=1; gctx.fillText(t.toFixed(tdec), x, padT+plotH+6); }
-  if(tLo<0){ const x0=X(0); gctx.strokeStyle='#4a5f96'; gctx.lineWidth=1.5;   // emphasize t=0
-    gctx.beginPath(); gctx.moveTo(x0,padT); gctx.lineTo(x0,padT+plotH); gctx.stroke();
-    gctx.lineWidth=1; gctx.strokeStyle='#2c3d6b'; }
-  gctx.textAlign='right'; gctx.textBaseline='middle';
+    ctx.globalAlpha=Math.abs(t)<1e-9?1:0.35; ctx.beginPath(); ctx.moveTo(x,padT); ctx.lineTo(x,padT+plotH); ctx.stroke();
+    ctx.globalAlpha=1; ctx.fillText(t.toFixed(tdec), x, padT+plotH+6); }
+  if(tLo<0){ const x0=X(0); ctx.strokeStyle='#4a5f96'; ctx.lineWidth=1.5;   // emphasize t=0
+    ctx.beginPath(); ctx.moveTo(x0,padT); ctx.lineTo(x0,padT+plotH); ctx.stroke();
+    ctx.lineWidth=1; ctx.strokeStyle='#2c3d6b'; }
+  ctx.textAlign='right'; ctx.textBaseline='middle';
   for(let i=0;i<=5;i++){ const v=yBot+(yTop-yBot)*i/5, y=Y(v);
-    gctx.globalAlpha=(Math.abs(v)<1e-9)?1:0.35; gctx.beginPath(); gctx.moveTo(padL,y); gctx.lineTo(padL+plotW,y); gctx.stroke();
-    gctx.globalAlpha=1; gctx.fillText(v.toFixed(AV<2?2:1), padL-8, y); }
-  gctx.fillStyle='#eaf0ff'; gctx.textAlign='center'; gctx.textBaseline='top'; gctx.font='12px -apple-system,sans-serif';
-  gctx.fillText('Time (s)', padL+plotW/2, H-15);
-  gctx.save(); gctx.translate(15,padT+plotH/2); gctx.rotate(-Math.PI/2);
-  gctx.fillText(plotLabel(),0,0); gctx.restore();
+    ctx.globalAlpha=(Math.abs(v)<1e-9)?1:0.35; ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(padL+plotW,y); ctx.stroke();
+    ctx.globalAlpha=1; ctx.fillText(v.toFixed(AV<2?2:1), padL-8, y); }
+  ctx.fillStyle='#eaf0ff'; ctx.textAlign='center'; ctx.textBaseline='top'; ctx.font='12px -apple-system,sans-serif';
+  ctx.fillText('Time (s)', padL+plotW/2, H-15);
+  ctx.save(); ctx.translate(15,padT+plotH/2); ctx.rotate(-Math.PI/2);
+  ctx.fillText(plotLabel(sel),0,0); ctx.restore();
 
   if(!any) return;
   // connect + points
   tracks.forEach(tk=>{
-    const s=seriesFor(tk); if(!s.length) return;
-    if($('#connectChk').checked && s.length>1){ gctx.strokeStyle=tk.color; gctx.lineWidth=2; gctx.globalAlpha=.7;
-      gctx.beginPath(); s.forEach((p,i)=>{ const x=X(p.t),y=Y(p.v); i?gctx.lineTo(x,y):gctx.moveTo(x,y); }); gctx.stroke(); gctx.globalAlpha=1; }
-    s.forEach(p=>{ gctx.beginPath(); gctx.arc(X(p.t),Y(p.v),4,0,7); gctx.fillStyle=tk.color; gctx.fill(); });
+    const s=seriesFor(tk,sel); if(!s.length) return;
+    if($('#connectChk').checked && s.length>1){ ctx.strokeStyle=tk.color; ctx.lineWidth=2; ctx.globalAlpha=.7;
+      ctx.beginPath(); s.forEach((p,i)=>{ const x=X(p.t),y=Y(p.v); i?ctx.lineTo(x,y):ctx.moveTo(x,y); }); ctx.stroke(); ctx.globalAlpha=1; }
+    s.forEach(p=>{ ctx.beginPath(); ctx.arc(X(p.t),Y(p.v),4,0,7); ctx.fillStyle=tk.color; ctx.fill(); });
   });
 
-  // ---- selection overlays (active track) ----
-  const selS=selectedSeries();
+  // ---- selection overlays (active track, in THIS plot's quantity) ----
+  const selS=selectedSeries(sel);
   if(selS.length>=2){                                  // shade the integral area
-    gctx.save(); gctx.beginPath(); gctx.rect(padL,padT,plotW,plotH); gctx.clip();
-    gctx.fillStyle=(tracks[activeTrack]&&tracks[activeTrack].color)||'#ffd166'; gctx.globalAlpha=.15;
+    ctx.save(); ctx.beginPath(); ctx.rect(padL,padT,plotW,plotH); ctx.clip();
+    ctx.fillStyle=(tracks[activeTrack]&&tracks[activeTrack].color)||'#ffd166'; ctx.globalAlpha=.15;
     const base=Y(Math.max(yBot,0));
-    gctx.beginPath(); gctx.moveTo(X(selS[0].t),base);
-    selS.forEach(p=>gctx.lineTo(X(p.t),Y(p.v)));
-    gctx.lineTo(X(selS[selS.length-1].t),base); gctx.closePath(); gctx.fill();
-    gctx.globalAlpha=1; gctx.restore();
+    ctx.beginPath(); ctx.moveTo(X(selS[0].t),base);
+    selS.forEach(p=>ctx.lineTo(X(p.t),Y(p.v)));
+    ctx.lineTo(X(selS[selS.length-1].t),base); ctx.closePath(); ctx.fill();
+    ctx.globalAlpha=1; ctx.restore();
   }
-  selS.forEach(p=>{ gctx.beginPath(); gctx.arc(X(p.t),Y(p.v),7,0,7);
-    gctx.strokeStyle='#ffd166'; gctx.lineWidth=2.5; gctx.stroke(); });
+  selS.forEach(p=>{ ctx.beginPath(); ctx.arc(X(p.t),Y(p.v),7,0,7);
+    ctx.strokeStyle='#ffd166'; ctx.lineWidth=2.5; ctx.stroke(); });
   if(selected.size===1){                               // single point: tangent + coordinate tag
-    const fr=[...selected][0], p=selS[0]||activeSeries().find(q=>q.frame===fr);
+    const fr=[...selected][0], p=selS[0]||activeSeries(sel).find(q=>q.frame===fr);
     if(p){
-      const sl=slopeAtFrame(fr);
-      if(sl!=null){ gctx.save(); gctx.beginPath(); gctx.rect(padL,padT,plotW,plotH); gctx.clip();
+      const sl=slopeAtFrame(fr,sel);
+      if(sl!=null){ ctx.save(); ctx.beginPath(); ctx.rect(padL,padT,plotW,plotH); ctx.clip();
         const dtp=Math.max(tmax*0.10,1e-6);
-        gctx.strokeStyle='#ffffff'; gctx.lineWidth=1.5; gctx.setLineDash([5,4]);
-        gctx.beginPath(); gctx.moveTo(X(p.t-dtp),Y(p.v-sl*dtp)); gctx.lineTo(X(p.t+dtp),Y(p.v+sl*dtp)); gctx.stroke();
-        gctx.setLineDash([]); gctx.restore(); }
-      const lbl=`(${p.t.toFixed(3)} s, ${p.v.toFixed(3)} ${unit()})`;
-      gctx.font='bold 12px -apple-system,sans-serif'; gctx.textAlign='left'; gctx.textBaseline='middle';
-      const tw=gctx.measureText(lbl).width;
+        ctx.strokeStyle='#ffffff'; ctx.lineWidth=1.5; ctx.setLineDash([5,4]);
+        ctx.beginPath(); ctx.moveTo(X(p.t-dtp),Y(p.v-sl*dtp)); ctx.lineTo(X(p.t+dtp),Y(p.v+sl*dtp)); ctx.stroke();
+        ctx.setLineDash([]); ctx.restore(); }
+      const lbl=`(${p.t.toFixed(3)} s, ${p.v.toFixed(3)} ${plotUnit(sel)})`;
+      ctx.font='bold 12px -apple-system,sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle';
+      const tw=ctx.measureText(lbl).width;
       let lx=X(p.t)+12, ly=Y(p.v)-14;
       if(lx+tw+10>padL+plotW) lx=X(p.t)-tw-14;
       ly=clamp(ly,padT+11,padT+plotH-11);
-      gctx.fillStyle='rgba(12,20,40,.9)'; gctx.fillRect(lx-6,ly-10,tw+12,20);
-      gctx.strokeStyle='#ffd166'; gctx.lineWidth=1.2; gctx.strokeRect(lx-6,ly-10,tw+12,20);
-      gctx.fillStyle='#eaf0ff'; gctx.fillText(lbl,lx,ly);
+      ctx.fillStyle='rgba(12,20,40,.9)'; ctx.fillRect(lx-6,ly-10,tw+12,20);
+      ctx.strokeStyle='#ffd166'; ctx.lineWidth=1.2; ctx.strokeRect(lx-6,ly-10,tw+12,20);
+      ctx.fillStyle='#eaf0ff'; ctx.fillText(lbl,lx,ly);
     }
   }
-  if(brush){                                           // live brush band
-    gctx.fillStyle='rgba(255,209,102,.15)'; gctx.fillRect(brush.x0,padT,brush.x1-brush.x0,plotH);
-    gctx.strokeStyle='rgba(255,209,102,.6)'; gctx.lineWidth=1; gctx.strokeRect(brush.x0,padT,brush.x1-brush.x0,plotH);
+  if(plot.brush){                                      // live brush band
+    ctx.fillStyle='rgba(255,209,102,.15)'; ctx.fillRect(plot.brush.x0,padT,plot.brush.x1-plot.brush.x0,plotH);
+    ctx.strokeStyle='rgba(255,209,102,.6)'; ctx.lineWidth=1; ctx.strokeRect(plot.brush.x0,padT,plot.brush.x1-plot.brush.x0,plotH);
   }
 
   // curve fit for active track (line or parabola), range-limited when a range is selected
-  if(fitMode!=='none' && tracks[activeTrack]){
+  if(plot.fitMode!=='none' && tracks[activeTrack]){
     const col=tracks[activeTrack].color;
-    // bigger, auto-shrink-to-fit label pinned to the bottom-left of the plot
     const drawFitLabel=(text)=>{
-      let fs=15; gctx.textAlign='left'; gctx.textBaseline='middle';
-      do{ gctx.font='bold '+fs+'px -apple-system,sans-serif'; if(gctx.measureText(text).width<=plotW-16) break; fs--; } while(fs>10);
-      const tw=gctx.measureText(text).width, h=fs+10, lx=padL+10, ly=padT+plotH-h/2-4;
-      gctx.fillStyle='rgba(12,20,40,.92)'; gctx.fillRect(lx-6,ly-h/2,tw+12,h);
-      gctx.strokeStyle=col; gctx.lineWidth=1.5; gctx.strokeRect(lx-6,ly-h/2,tw+12,h);
-      gctx.fillStyle=col; gctx.fillText(text,lx,ly);
+      let fs=15; ctx.textAlign='left'; ctx.textBaseline='middle';
+      do{ ctx.font='bold '+fs+'px -apple-system,sans-serif'; if(ctx.measureText(text).width<=plotW-16) break; fs--; } while(fs>10);
+      const tw=ctx.measureText(text).width, h=fs+10, lx=padL+10, ly=padT+plotH-h/2-4;
+      ctx.fillStyle='rgba(12,20,40,.92)'; ctx.fillRect(lx-6,ly-h/2,tw+12,h);
+      ctx.strokeStyle=col; ctx.lineWidth=1.5; ctx.strokeRect(lx-6,ly-h/2,tw+12,h);
+      ctx.fillStyle=col; ctx.fillText(text,lx,ly);
     };
-    if(fitMode==='line'){
-      const useSel=selS.length>=2, s=useSel?selS:seriesFor(tracks[activeTrack]);
+    if(plot.fitMode==='line'){
+      const useSel=selS.length>=2, s=useSel?selS:seriesFor(tracks[activeTrack],sel);
       if(s.length>=2){ const f=linFit(s);
         if(f){ const ta=useSel?s[0].t:0, tb=useSel?s[s.length-1].t:tmax;
-          gctx.save(); gctx.beginPath(); gctx.rect(padL,padT,plotW,plotH); gctx.clip();
-          gctx.strokeStyle=col; gctx.lineWidth=2.5; gctx.setLineDash([7,5]);
-          gctx.beginPath(); gctx.moveTo(X(ta),Y(f.m*ta+f.b)); gctx.lineTo(X(tb),Y(f.m*tb+f.b)); gctx.stroke();
-          gctx.setLineDash([]); gctx.restore();
+          ctx.save(); ctx.beginPath(); ctx.rect(padL,padT,plotW,plotH); ctx.clip();
+          ctx.strokeStyle=col; ctx.lineWidth=2.5; ctx.setLineDash([7,5]);
+          ctx.beginPath(); ctx.moveTo(X(ta),Y(f.m*ta+f.b)); ctx.lineTo(X(tb),Y(f.m*tb+f.b)); ctx.stroke();
+          ctx.setLineDash([]); ctx.restore();
           const sg=f.b>=0?'+':'−';
-          drawFitLabel(`${plotShort()} = ${f.m.toFixed(3)}·t ${sg} ${Math.abs(f.b).toFixed(3)}    slope = ${f.m.toFixed(3)} ${plotUnit()}/s${useSel?'  · range':''}`);
+          drawFitLabel(`${plotShort(sel)} = ${f.m.toFixed(3)}·t ${sg} ${Math.abs(f.b).toFixed(3)}    slope = ${f.m.toFixed(3)} ${plotUnit(sel)}/s${useSel?'  · range':''}`);
         }
       }
     } else {   // parabola
-      const useSel=selS.length>=3, s=useSel?selS:seriesFor(tracks[activeTrack]);
+      const useSel=selS.length>=3, s=useSel?selS:seriesFor(tracks[activeTrack],sel);
       if(s.length>=3){ const f=quadFit(s);
         if(f){ const ta=useSel?s[0].t:0, tb=useSel?s[s.length-1].t:tmax;
-          gctx.save(); gctx.beginPath(); gctx.rect(padL,padT,plotW,plotH); gctx.clip();
-          gctx.strokeStyle=col; gctx.lineWidth=2.5; gctx.setLineDash([7,5]); gctx.beginPath();
-          const N=60; for(let i=0;i<=N;i++){ const t=ta+(tb-ta)*i/N, v=f.a*t*t+f.b*t+f.c; i?gctx.lineTo(X(t),Y(v)):gctx.moveTo(X(t),Y(v)); }
-          gctx.stroke(); gctx.setLineDash([]); gctx.restore();
+          ctx.save(); ctx.beginPath(); ctx.rect(padL,padT,plotW,plotH); ctx.clip();
+          ctx.strokeStyle=col; ctx.lineWidth=2.5; ctx.setLineDash([7,5]); ctx.beginPath();
+          const N=60; for(let i=0;i<=N;i++){ const t=ta+(tb-ta)*i/N, v=f.a*t*t+f.b*t+f.c; i?ctx.lineTo(X(t),Y(v)):ctx.moveTo(X(t),Y(v)); }
+          ctx.stroke(); ctx.setLineDash([]); ctx.restore();
           const sb=f.b>=0?'+':'−', sc=f.c>=0?'+':'−';
-          drawFitLabel(`${plotShort()} = ${f.a.toFixed(3)}·t² ${sb} ${Math.abs(f.b).toFixed(3)}·t ${sc} ${Math.abs(f.c).toFixed(3)}    2·a = ${(2*f.a).toFixed(3)} ${plotUnit()}/s²${useSel?'  · range':''}`);
+          drawFitLabel(`${plotShort(sel)} = ${f.a.toFixed(3)}·t² ${sb} ${Math.abs(f.b).toFixed(3)}·t ${sc} ${Math.abs(f.c).toFixed(3)}    2·a = ${(2*f.a).toFixed(3)} ${plotUnit(sel)}/s²${useSel?'  · range':''}`);
         }
       }
     }
   }
 }
-window.addEventListener('resize', ()=>{ drawGraph(); if(loaded) render(); });
+window.addEventListener('resize', ()=>{ drawAllGraphs(); if(loaded) render(); });
 
 /* ---------- Selection & analysis ---------- */
 function activeTk(){ return tracks[activeTrack]; }
-function activeSeries(){ const tk=activeTk(); return tk?seriesFor(tk):[]; }        // sorted by t, has frame
-function selectedSeries(){ return activeSeries().filter(p=>selected.has(p.frame)); }
+function activeSeries(sel){ const tk=activeTk(); return tk?seriesFor(tk,sel):[]; }   // sorted by t, has frame
+function selectedSeries(sel){ return activeSeries(sel).filter(p=>selected.has(p.frame)); }
 function toggleSel(frame){ if(selected.has(frame)) selected.delete(frame); else selected.add(frame); }
 function clearSelection(){ selected.clear(); selectionChanged(); }
-function selectionChanged(){ drawGraph(); if(loaded) render(); renderData(); updateSelUI(); }
+function selectionChanged(){ drawAllGraphs(); if(loaded) render(); renderData(); updateSelUI(); }
 function deleteSelected(){ const tk=activeTk(); if(!tk||!selected.size) return;
   pushUndo();                                  // deleting points is undoable
   tk.points=tk.points.filter(p=>!selected.has(p.frame)); selected.clear();
   renderTracks(); renderLegend(); updateGraph(); if(loaded) render(); updateSelUI(); }
-function slopeAtFrame(frame){ const s=activeSeries(); if(s.length<2) return null;
+function slopeAtFrame(frame,sel){ const s=activeSeries(sel); if(s.length<2) return null;
   const i=s.findIndex(p=>p.frame===frame); if(i<0) return null;
   const a=i===0?s[0]:s[i-1], b=i===s.length-1?s[i]:s[i+1];
   const dt=b.t-a.t; return Math.abs(dt)<1e-9?null:(b.v-a.v)/dt; }                  // central difference
-function integralOfSelection(){ const s=selectedSeries(); if(s.length<2) return null;
+function integralOfSelection(sel){ const s=selectedSeries(sel); if(s.length<2) return null;
   let area=0; for(let i=0;i<s.length-1;i++) area+=0.5*(s[i].v+s[i+1].v)*(s[i+1].t-s[i].t);  // trapezoid
   return {area, t0:s[0].t, t1:s[s.length-1].t}; }
 
-function gXt(t){ return gview.padL+((t-gview.tLo)/(gview.tmax-gview.tLo))*gview.plotW; }
-function gYv(v){ return gview.padT+gview.plotH-((v-gview.yBot)/(gview.yTop-gview.yBot))*gview.plotH; }
-function gInvT(px){ if(!gview) return 0; return clamp(gview.tLo+(px-gview.padL)/gview.plotW*(gview.tmax-gview.tLo), gview.tLo, gview.tmax); }
-function hitTestGraph(x,y){ if(!gview) return null; let best=null,bd=15*15;
-  activeSeries().forEach(p=>{ const dx=x-gXt(p.t),dy=y-gYv(p.v),d=dx*dx+dy*dy; if(d<bd){bd=d;best=p.frame;} });
+function gXt(pl,t){ const g=pl.gview; return g.padL+((t-g.tLo)/(g.tmax-g.tLo))*g.plotW; }
+function gYv(pl,v){ const g=pl.gview; return g.padT+g.plotH-((v-g.yBot)/(g.yTop-g.yBot))*g.plotH; }
+function gInvT(pl,px){ const g=pl.gview; if(!g) return 0; return clamp(g.tLo+(px-g.padL)/g.plotW*(g.tmax-g.tLo), g.tLo, g.tmax); }
+function hitTestGraph(pl,x,y){ if(!pl.gview) return null; let best=null,bd=15*15;
+  activeSeries(pl.sel).forEach(p=>{ const dx=x-gXt(pl,p.t),dy=y-gYv(pl,p.v),d=dx*dx+dy*dy; if(d<bd){bd=d;best=p.frame;} });
   return best; }
 function hitTestVideo(pt){ const tk=activeTk(); if(!tk) return null; const tol=Math.max(12,vw*0.03); let best=null,bd=tol*tol;
   tk.points.forEach(q=>{ const dx=pt.x-q.x,dy=pt.y-q.y,d=dx*dx+dy*dy; if(d<bd){bd=d;best=q.frame;} });
   return best; }
 
-gcanvas.addEventListener('pointerdown',e=>{ if(!gview) return; const r=gcanvas.getBoundingClientRect();
-  gDown={x:e.clientX-r.left,y:e.clientY-r.top,moved:false}; try{gcanvas.setPointerCapture(e.pointerId);}catch(_){} });
-gcanvas.addEventListener('pointermove',e=>{ if(!gDown) return; const r=gcanvas.getBoundingClientRect();
-  const x=e.clientX-r.left; if(Math.abs(x-gDown.x)>5){ gDown.moved=true; brush={x0:Math.min(gDown.x,x),x1:Math.max(gDown.x,x)}; drawGraph(); } });
-gcanvas.addEventListener('pointerup',e=>{ if(!gDown) return; const r=gcanvas.getBoundingClientRect();
-  const x=e.clientX-r.left, y=e.clientY-r.top;
-  if(gDown.moved && brush){ const t0=gInvT(brush.x0),t1=gInvT(brush.x1); selected.clear();
-    activeSeries().forEach(p=>{ if(p.t>=t0&&p.t<=t1) selected.add(p.frame); }); brush=null; }
-  else { const f=hitTestGraph(x,y); if(f!=null) toggleSel(f); }
-  gDown=null; selectionChanged(); });
+function attachGraphHandlers(pl){
+  const canvas=pl.canvas;
+  canvas.addEventListener('pointerdown',e=>{ if(!pl.gview) return; focusedPlot=pl; const r=canvas.getBoundingClientRect();
+    gDrag={plot:pl,x:e.clientX-r.left,y:e.clientY-r.top,moved:false}; try{canvas.setPointerCapture(e.pointerId);}catch(_){} });
+  canvas.addEventListener('pointermove',e=>{ if(!gDrag||gDrag.plot!==pl) return; const r=canvas.getBoundingClientRect();
+    const x=e.clientX-r.left; if(Math.abs(x-gDrag.x)>5){ gDrag.moved=true; pl.brush={x0:Math.min(gDrag.x,x),x1:Math.max(gDrag.x,x)}; drawGraph(pl); } });
+  canvas.addEventListener('pointerup',e=>{ if(!gDrag||gDrag.plot!==pl) return; const r=canvas.getBoundingClientRect();
+    const x=e.clientX-r.left, y=e.clientY-r.top;
+    if(gDrag.moved && pl.brush){ const t0=gInvT(pl,pl.brush.x0),t1=gInvT(pl,pl.brush.x1); selected.clear();
+      activeSeries(pl.sel).forEach(p=>{ if(p.t>=t0&&p.t<=t1) selected.add(p.frame); }); pl.brush=null; }
+    else { const f=hitTestGraph(pl,x,y); if(f!=null) toggleSel(f); }
+    gDrag=null; focusedPlot=pl; selectionChanged(); });
+}
+PLOTS.forEach(attachGraphHandlers);
 
 $('#delSelBtn').onclick=deleteSelected;
 $('#clearSelBtn').onclick=clearSelection;
 
 function updateSelUI(){
-  const n=selected.size, pu=plotUnit(), ps=plotShort();
+  const sel=focusedPlot.sel, pu=plotUnit(sel), ps=plotShort(sel), n=selected.size;
+  const gl='<b>Graph '+(PLOTS.indexOf(focusedPlot)+1)+'</b>';
   $('#delSelBtn').disabled=n===0; $('#clearSelBtn').disabled=n===0;
-  if(n===0){ $('#selInfo').innerHTML='Tap a point (graph, table, or video in Edit mode) to select it. Drag across the graph to select a time range.'; return; }
+  if(n===0){ $('#selInfo').innerHTML='Tap a point (graph, table, or video in Edit mode) to select it. Drag across a graph to select a time range.'; return; }
   if(n===1){ const fr=[...selected][0], tk=activeTk(), p=tk&&tk.points.find(q=>q.frame===fr);
     if(!p){ $('#selInfo').textContent='Selected point is no longer present.'; return; }
-    const v=valueAtFrame(tk,fr), sl=slopeAtFrame(fr);
-    $('#selInfo').innerHTML=`<b>Point</b> · frame ${fr} · t=${(p.t-timeZero).toFixed(3)} s · ${ps}=${v.toFixed(3)} ${pu} · pixel (${p.x.toFixed(0)}, ${p.y.toFixed(0)})`+
+    const v=valueAtFrame(tk,fr,sel), sl=slopeAtFrame(fr,sel);
+    $('#selInfo').innerHTML=`<b>Point</b> · frame ${fr} · t=${(p.t-timeZero).toFixed(3)} s · ${gl} ${ps}=${v.toFixed(3)} ${pu} · pixel (${p.x.toFixed(0)}, ${p.y.toFixed(0)})`+
       (sl!=null?` · slope≈<b>${sl.toFixed(3)} ${pu}/s</b>`:'');
     return; }
-  const s=selectedSeries(), fit=linFit(s), ig=integralOfSelection();
-  let msg=`<b>Range</b> · ${n} pts · Δt=${(s[s.length-1].t-s[0].t).toFixed(3)} s`;
-  if(fitMode==='parabola' && s.length>=3){ const q=quadFit(s); if(q) msg+=` · 2·a=<b>${(2*q.a).toFixed(3)} ${pu}/s²</b>`; }
-  if(fit) msg+=` · best-fit slope=<b>${fit.m.toFixed(3)} ${pu}/s</b>`;
+  const s=selectedSeries(sel), fit=linFit(s), ig=integralOfSelection(sel);
+  let msg=`<b>Range</b> · ${n} pts · Δt=${(s[s.length-1].t-s[0].t).toFixed(3)} s · ${gl}`;
+  if(focusedPlot.fitMode==='parabola' && s.length>=3){ const q=quadFit(s); if(q) msg+=` · 2·a=<b>${(2*q.a).toFixed(3)} ${pu}/s²</b>`; }
+  if(fit) msg+=` · slope=<b>${fit.m.toFixed(3)} ${pu}/s</b>`;
   if(ig)  msg+=` · ∫(${ps})dt=<b>${ig.area.toFixed(3)} ${pu}·s</b>`;
   $('#selInfo').innerHTML=msg;
 }
@@ -1025,25 +1062,28 @@ function renderLegend(){ const c=$('#legend'); c.innerHTML='';
     c.appendChild(el); }); }
 function renderData(){
   const tk=tracks[activeTrack]; const tb=$('#dataBody'); tb.innerHTML='';
-  $('#valHead').textContent=plotShort()+' ('+plotUnit()+')';
+  const s1=PLOTS[0].sel, s2=PLOTS[1].sel;
+  $('#valHead1').textContent=plotShort(s1)+' ('+plotUnit(s1)+')';
+  $('#valHead2').textContent=plotShort(s2)+' ('+plotUnit(s2)+')';
   const pts=(tk?tk.points:[]).slice().sort((a,b)=>a.frame-b.frame);
-  const vmap={}; if(tk) seriesFor(tk).forEach(e=>vmap[e.frame]=e.v);
+  const m1={},m2={}; if(tk){ seriesFor(tk,s1).forEach(e=>m1[e.frame]=e.v); seriesFor(tk,s2).forEach(e=>m2[e.frame]=e.v); }
   $('#emptyMsg').style.display=pts.length?'none':'block';
   pts.forEach(p=>{ const tr=document.createElement('tr');
     if(selected.has(p.frame)) tr.className='selrow';
-    const vv=vmap[p.frame];
-    tr.innerHTML=`<td>${p.frame}</td><td>${(p.t-timeZero).toFixed(3)}</td><td>${p.x.toFixed(0)}</td><td>${p.y.toFixed(0)}</td><td>${(vv==null?0:vv).toFixed(3)}</td>`;
+    const v1=m1[p.frame], v2=m2[p.frame];
+    tr.innerHTML=`<td>${p.frame}</td><td>${(p.t-timeZero).toFixed(3)}</td><td>${p.x.toFixed(0)}</td><td>${p.y.toFixed(0)}</td><td>${(v1==null?0:v1).toFixed(3)}</td><td>${(v2==null?0:v2).toFixed(3)}</td>`;
     tr.onclick=()=>{ toggleSel(p.frame); selectionChanged(); };
     tb.appendChild(tr); });
 }
 
 /* ---------- CSV ---------- */
 $('#exportBtn').onclick=()=>{
-  let rows=[['object','frame','time_s','x_px','y_px','value_'+plotUnit(),'plot_'+plotSel()]];
-  tracks.forEach(tk=>{ const vmap={}; seriesFor(tk).forEach(e=>vmap[e.frame]=e.v);
+  const s1=PLOTS[0].sel, s2=PLOTS[1].sel;
+  let rows=[['object','frame','time_s','x_px','y_px','g1_'+s1+'('+plotUnit(s1)+')','g2_'+s2+'('+plotUnit(s2)+')']];
+  tracks.forEach(tk=>{ const m1={},m2={}; seriesFor(tk,s1).forEach(e=>m1[e.frame]=e.v); seriesFor(tk,s2).forEach(e=>m2[e.frame]=e.v);
     tk.points.slice().sort((a,b)=>a.frame-b.frame).forEach(p=>{
-      const vv=vmap[p.frame];
-      rows.push([tk.name,p.frame,(p.t-timeZero).toFixed(4),p.x.toFixed(1),p.y.toFixed(1),(vv==null?0:vv).toFixed(4),plotSel()]); }); });
+      const v1=m1[p.frame], v2=m2[p.frame];
+      rows.push([tk.name,p.frame,(p.t-timeZero).toFixed(4),p.x.toFixed(1),p.y.toFixed(1),(v1==null?0:v1).toFixed(4),(v2==null?0:v2).toFixed(4)]); }); });
   if(rows.length<2){ status('No data to export yet.'); return; }
   const csv=rows.map(r=>r.join(',')).join('\n');
   const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
@@ -1056,7 +1096,7 @@ $('#helpBtn').onclick=()=>$('#helpModal').classList.add('show');
 $('#closeHelp').onclick=()=>$('#helpModal').classList.remove('show');
 $('#helpModal').onclick=e=>{ if(e.target.id==='helpModal') $('#helpModal').classList.remove('show'); };
 
-renderTracks(); renderLegend(); renderData(); drawGraph(); updateSelUI();
+renderTracks(); renderLegend(); renderData(); drawAllGraphs(); updateSelUI();
 </script>
 </body>
 </html>
