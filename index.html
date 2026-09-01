@@ -217,9 +217,21 @@
       <div class="toolrow">
         <label>Plot:
           <select id="plotSel">
-            <option value="dist">Distance from origin</option>
-            <option value="x">X position</option>
-            <option value="y">Y position</option>
+            <optgroup label="Position">
+              <option value="dist">Distance from origin</option>
+              <option value="x">X position</option>
+              <option value="y">Y position</option>
+            </optgroup>
+            <optgroup label="Velocity">
+              <option value="speed">Speed |v|</option>
+              <option value="vx">Velocity x</option>
+              <option value="vy">Velocity y</option>
+            </optgroup>
+            <optgroup label="Acceleration">
+              <option value="accel">Acceleration |a|</option>
+              <option value="ax">Acceleration x</option>
+              <option value="ay">Acceleration y</option>
+            </optgroup>
           </select>
         </label>
         <label><input type="checkbox" id="connectChk" checked> Connect</label>
@@ -765,15 +777,40 @@ $('#fitBtn').onclick=()=>{ fitMode=(fitMode==='line'?'none':'line'); refreshFitB
 $('#parabBtn').onclick=()=>{ fitMode=(fitMode==='parabola'?'none':'parabola'); refreshFitButtons(); updateGraph(); };
 
 function unit(){ return scaleMPP?'m':'px'; }
-function valueOf(tk,p){                     // returns plotted y in current units
-  const k=scaleMPP||1;
-  const o=origin|| (tk.points.length?tk.points.slice().sort((a,b)=>a.frame-b.frame)[0]:{x:0,y:0});
-  const sel=$('#plotSel').value;
-  if(sel==='x') return (p.x-o.x)*k;
-  if(sel==='y') return (p.y-o.y)*k;
-  return Math.hypot(p.x-o.x,p.y-o.y)*k;
+function plotSel(){ return $('#plotSel').value; }
+function isVel(s){ return s==='speed'||s==='vx'||s==='vy'; }
+function isAcc(s){ return s==='accel'||s==='ax'||s==='ay'; }
+function plotUnit(){ const s=plotSel(),u=unit(); return isAcc(s)?u+'/s²':isVel(s)?u+'/s':u; }
+const PLOT_NAME={dist:'Distance from origin',x:'X position',y:'Y position',speed:'Speed |v|',vx:'Velocity x',vy:'Velocity y',accel:'Acceleration |a|',ax:'Acceleration x',ay:'Acceleration y'};
+const PLOT_SHORT={dist:'dist',x:'x',y:'y',speed:'|v|',vx:'vx',vy:'vy',accel:'|a|',ax:'ax',ay:'ay'};
+function plotLabel(){ return (PLOT_NAME[plotSel()]||'Value')+' ('+plotUnit()+')'; }
+function plotShort(){ return PLOT_SHORT[plotSel()]||'val'; }
+// central-difference derivative of samples y[] at times t[]
+function deriv(y,t){ const n=y.length, d=new Array(n).fill(0);
+  for(let i=0;i<n && n>=2;i++){ const a=i===0?0:i-1, b=i===n-1?n-1:i+1, dt=t[b]-t[a];
+    d[i]=Math.abs(dt)>1e-9?(y[b]-y[a])/dt:0; }
+  return d; }
+function seriesFor(tk){                       // {t, v, frame} for the current plot quantity
+  const pts=tk.points.slice().sort((a,b)=>a.t-b.t);
+  const s=plotSel(), k=scaleMPP||1;
+  const o=origin||(pts.length?pts[0]:{x:0,y:0});
+  const t=pts.map(p=>p.t-timeZero);
+  const ux=pts.map(p=>(p.x-o.x)*k), uy=pts.map(p=>(p.y-o.y)*k);
+  let val;
+  if(s==='x') val=ux;
+  else if(s==='y') val=uy;
+  else if(s==='dist') val=pts.map(p=>Math.hypot(p.x-o.x,p.y-o.y)*k);
+  else {                                      // velocity / acceleration via finite differences
+    const vx=deriv(ux,t), vy=deriv(uy,t);
+    if(s==='vx') val=vx;
+    else if(s==='vy') val=vy;
+    else if(s==='speed') val=vx.map((v,i)=>Math.hypot(v,vy[i]));
+    else { const ax=deriv(vx,t), ay=deriv(vy,t);
+      if(s==='ax') val=ax; else if(s==='ay') val=ay; else val=ax.map((a,i)=>Math.hypot(a,ay[i])); }
+  }
+  return pts.map((p,i)=>({t:t[i], v:val[i], frame:p.frame}));
 }
-function seriesFor(tk){ return tk.points.slice().sort((a,b)=>a.t-b.t).map(p=>({t:p.t-timeZero,v:valueOf(tk,p),frame:p.frame})); }
+function valueAtFrame(tk,frame){ const e=seriesFor(tk).find(p=>p.frame===frame); return e?e.v:0; }
 function linFit(pts){ const n=pts.length; let sx=0,sy=0,sxx=0,sxy=0;
   pts.forEach(p=>{sx+=p.t;sy+=p.v;sxx+=p.t*p.t;sxy+=p.t*p.v;});
   const den=n*sxx-sx*sx; if(Math.abs(den)<1e-9)return null;
@@ -830,8 +867,7 @@ function drawGraph(){
   gctx.fillStyle='#eaf0ff'; gctx.textAlign='center'; gctx.textBaseline='top'; gctx.font='12px -apple-system,sans-serif';
   gctx.fillText('Time (s)', padL+plotW/2, H-15);
   gctx.save(); gctx.translate(15,padT+plotH/2); gctx.rotate(-Math.PI/2);
-  const yl=$('#plotSel').value==='x'?'X':$('#plotSel').value==='y'?'Y':'Distance';
-  gctx.fillText(yl+' ('+unit()+')',0,0); gctx.restore();
+  gctx.fillText(plotLabel(),0,0); gctx.restore();
 
   if(!any) return;
   // connect + points
@@ -901,7 +937,7 @@ function drawGraph(){
           gctx.beginPath(); gctx.moveTo(X(ta),Y(f.m*ta+f.b)); gctx.lineTo(X(tb),Y(f.m*tb+f.b)); gctx.stroke();
           gctx.setLineDash([]); gctx.restore();
           const sg=f.b>=0?'+':'−';
-          drawFitLabel(`${yl.toLowerCase()} = ${f.m.toFixed(3)}·t ${sg} ${Math.abs(f.b).toFixed(3)}    slope = ${f.m.toFixed(3)} ${unit()}/s${useSel?'  · range':''}`);
+          drawFitLabel(`${plotShort()} = ${f.m.toFixed(3)}·t ${sg} ${Math.abs(f.b).toFixed(3)}    slope = ${f.m.toFixed(3)} ${plotUnit()}/s${useSel?'  · range':''}`);
         }
       }
     } else {   // parabola
@@ -913,7 +949,7 @@ function drawGraph(){
           const N=60; for(let i=0;i<=N;i++){ const t=ta+(tb-ta)*i/N, v=f.a*t*t+f.b*t+f.c; i?gctx.lineTo(X(t),Y(v)):gctx.moveTo(X(t),Y(v)); }
           gctx.stroke(); gctx.setLineDash([]); gctx.restore();
           const sb=f.b>=0?'+':'−', sc=f.c>=0?'+':'−';
-          drawFitLabel(`${yl.toLowerCase()} = ${f.a.toFixed(3)}·t² ${sb} ${Math.abs(f.b).toFixed(3)}·t ${sc} ${Math.abs(f.c).toFixed(3)}    accel = 2a = ${(2*f.a).toFixed(3)} ${unit()}/s²${useSel?'  · range':''}`);
+          drawFitLabel(`${plotShort()} = ${f.a.toFixed(3)}·t² ${sb} ${Math.abs(f.b).toFixed(3)}·t ${sc} ${Math.abs(f.c).toFixed(3)}    2·a = ${(2*f.a).toFixed(3)} ${plotUnit()}/s²${useSel?'  · range':''}`);
         }
       }
     }
@@ -965,21 +1001,20 @@ $('#delSelBtn').onclick=deleteSelected;
 $('#clearSelBtn').onclick=clearSelection;
 
 function updateSelUI(){
-  const n=selected.size, u=unit();
+  const n=selected.size, pu=plotUnit(), ps=plotShort();
   $('#delSelBtn').disabled=n===0; $('#clearSelBtn').disabled=n===0;
-  const yl=$('#plotSel').value==='x'?'x':$('#plotSel').value==='y'?'y':'dist';
   if(n===0){ $('#selInfo').innerHTML='Tap a point (graph, table, or video in Edit mode) to select it. Drag across the graph to select a time range.'; return; }
   if(n===1){ const fr=[...selected][0], tk=activeTk(), p=tk&&tk.points.find(q=>q.frame===fr);
     if(!p){ $('#selInfo').textContent='Selected point is no longer present.'; return; }
-    const v=valueOf(tk,p), sl=slopeAtFrame(fr);
-    $('#selInfo').innerHTML=`<b>Point</b> · frame ${fr} · t=${(p.t-timeZero).toFixed(3)} s · ${yl}=${v.toFixed(3)} ${u} · pixel (${p.x.toFixed(0)}, ${p.y.toFixed(0)})`+
-      (sl!=null?` · slope≈<b>${sl.toFixed(3)} ${u}/s</b>`:'');
+    const v=valueAtFrame(tk,fr), sl=slopeAtFrame(fr);
+    $('#selInfo').innerHTML=`<b>Point</b> · frame ${fr} · t=${(p.t-timeZero).toFixed(3)} s · ${ps}=${v.toFixed(3)} ${pu} · pixel (${p.x.toFixed(0)}, ${p.y.toFixed(0)})`+
+      (sl!=null?` · slope≈<b>${sl.toFixed(3)} ${pu}/s</b>`:'');
     return; }
   const s=selectedSeries(), fit=linFit(s), ig=integralOfSelection();
   let msg=`<b>Range</b> · ${n} pts · Δt=${(s[s.length-1].t-s[0].t).toFixed(3)} s`;
-  if(fitMode==='parabola' && s.length>=3){ const q=quadFit(s); if(q) msg+=` · accel 2a=<b>${(2*q.a).toFixed(3)} ${u}/s²</b>`; }
-  if(fit) msg+=` · best-fit slope=<b>${fit.m.toFixed(3)} ${u}/s</b>`;
-  if(ig)  msg+=` · ∫(${yl})dt=<b>${ig.area.toFixed(3)} ${u}·s</b>`;
+  if(fitMode==='parabola' && s.length>=3){ const q=quadFit(s); if(q) msg+=` · 2·a=<b>${(2*q.a).toFixed(3)} ${pu}/s²</b>`; }
+  if(fit) msg+=` · best-fit slope=<b>${fit.m.toFixed(3)} ${pu}/s</b>`;
+  if(ig)  msg+=` · ∫(${ps})dt=<b>${ig.area.toFixed(3)} ${pu}·s</b>`;
   $('#selInfo').innerHTML=msg;
 }
 
@@ -990,21 +1025,25 @@ function renderLegend(){ const c=$('#legend'); c.innerHTML='';
     c.appendChild(el); }); }
 function renderData(){
   const tk=tracks[activeTrack]; const tb=$('#dataBody'); tb.innerHTML='';
-  $('#valHead').textContent=($('#plotSel').value==='x'?'x':$('#plotSel').value==='y'?'y':'dist')+' ('+unit()+')';
-  const s=(tk?tk.points:[]).slice().sort((a,b)=>a.frame-b.frame);
-  $('#emptyMsg').style.display=s.length?'none':'block';
-  s.forEach(p=>{ const tr=document.createElement('tr');
+  $('#valHead').textContent=plotShort()+' ('+plotUnit()+')';
+  const pts=(tk?tk.points:[]).slice().sort((a,b)=>a.frame-b.frame);
+  const vmap={}; if(tk) seriesFor(tk).forEach(e=>vmap[e.frame]=e.v);
+  $('#emptyMsg').style.display=pts.length?'none':'block';
+  pts.forEach(p=>{ const tr=document.createElement('tr');
     if(selected.has(p.frame)) tr.className='selrow';
-    tr.innerHTML=`<td>${p.frame}</td><td>${(p.t-timeZero).toFixed(3)}</td><td>${p.x.toFixed(0)}</td><td>${p.y.toFixed(0)}</td><td>${valueOf(tk,p).toFixed(3)}</td>`;
+    const vv=vmap[p.frame];
+    tr.innerHTML=`<td>${p.frame}</td><td>${(p.t-timeZero).toFixed(3)}</td><td>${p.x.toFixed(0)}</td><td>${p.y.toFixed(0)}</td><td>${(vv==null?0:vv).toFixed(3)}</td>`;
     tr.onclick=()=>{ toggleSel(p.frame); selectionChanged(); };
     tb.appendChild(tr); });
 }
 
 /* ---------- CSV ---------- */
 $('#exportBtn').onclick=()=>{
-  let rows=[['object','frame','time_s','x_px','y_px','value_'+unit(),'plot_'+$('#plotSel').value]];
-  tracks.forEach(tk=>tk.points.slice().sort((a,b)=>a.frame-b.frame).forEach(p=>{
-    rows.push([tk.name,p.frame,(p.t-timeZero).toFixed(4),p.x.toFixed(1),p.y.toFixed(1),valueOf(tk,p).toFixed(4),$('#plotSel').value]); }));
+  let rows=[['object','frame','time_s','x_px','y_px','value_'+plotUnit(),'plot_'+plotSel()]];
+  tracks.forEach(tk=>{ const vmap={}; seriesFor(tk).forEach(e=>vmap[e.frame]=e.v);
+    tk.points.slice().sort((a,b)=>a.frame-b.frame).forEach(p=>{
+      const vv=vmap[p.frame];
+      rows.push([tk.name,p.frame,(p.t-timeZero).toFixed(4),p.x.toFixed(1),p.y.toFixed(1),(vv==null?0:vv).toFixed(4),plotSel()]); }); });
   if(rows.length<2){ status('No data to export yet.'); return; }
   const csv=rows.map(r=>r.join(',')).join('\n');
   const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
