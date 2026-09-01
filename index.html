@@ -74,8 +74,9 @@
   .trackchip .cnt{color:var(--muted);font-size:11px}
 
   /* graph */
+  .graphrow{display:flex;flex-direction:column;gap:10px}         /* stacked by default (narrow/portrait) */
   .graphcard{flex:1 0 auto;display:flex;flex-direction:column;min-height:0}
-  .canvaswrap{flex:1;position:relative;min-height:150px}
+  .canvaswrap{flex:1;position:relative;min-height:210px}
   .canvaswrap canvas{position:absolute;inset:0;width:100%;height:100%}
   .toolrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px;flex-shrink:0}
   .toolrow .spacer{flex:1}
@@ -109,6 +110,12 @@
     main{flex-direction:column;height:auto;overflow:auto}body{overflow:auto}
     .left{border-right:none;border-bottom:1px solid var(--line)}
     #disp{max-height:70vh}.canvaswrap{min-height:300px}
+  }
+  /* Wide (landscape) views: put the two graphs side by side */
+  @media (min-width:1050px){
+    .graphrow{flex-direction:row;align-items:stretch}
+    .graphrow>.graphcard{flex:1 1 0;min-width:0}
+    .graphrow .canvaswrap{min-height:200px}
   }
 </style>
 </head>
@@ -211,6 +218,7 @@
 
   <!-- RIGHT: graph -->
   <section class="pane right">
+    <div class="graphrow">
     <div class="card graphcard">
       <h2>Graph 1</h2>
       <div class="canvaswrap"><canvas id="graph1"></canvas></div>
@@ -268,6 +276,7 @@
         <span class="spacer"></span>
         <button class="btn secondary small" id="exportBtn">⬇ CSV</button>
       </div>
+    </div>
     </div>
     <div class="card">
       <h2>Selection &amp; analysis</h2>
