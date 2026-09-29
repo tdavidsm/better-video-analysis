@@ -142,6 +142,11 @@
       <div class="stage" style="margin-top:10px">
         <div class="drop" id="dropMsg"><b>Drop a video here</b><br>or use “Choose video…”. Everything runs in your browser — nothing is uploaded.</div>
         <canvas id="disp"></canvas>
+        <div id="zoomCtl" style="position:absolute;left:8px;top:8px;z-index:3;display:none;gap:6px">
+          <button class="btn secondary small" id="zoomOutBtn" title="Zoom out">🔍−</button>
+          <button class="btn secondary small" id="zoomInBtn" title="Zoom in">🔍+</button>
+          <button class="btn secondary small" id="zoomResetBtn" title="Reset zoom (fit)">⤢</button>
+        </div>
         <button class="btn secondary small" id="undoBtn" style="position:absolute;top:8px;right:8px;z-index:3;display:none">↶ Undo</button>
       </div>
       <div class="rowline" style="margin-top:10px">
@@ -289,7 +294,7 @@
     <div class="card"><h2>Objects</h2><div class="legend" id="legend"></div></div>
     <div class="card tablecard">
       <h2>Data — selected object</h2>
-      <table><thead><tr><th>frame</th><th>t (s)</th><th>x (px)</th><th>y (px)</th><th id="valHead1">g1</th><th id="valHead2">g2</th></tr></thead>
+      <table><thead><tr><th>frame</th><th>t (s)</th><th id="xHead">x</th><th id="yHead">y</th><th id="valHead1">g1</th><th id="valHead2">g2</th></tr></thead>
         <tbody id="dataBody"></tbody></table>
       <div class="empty" id="emptyMsg">No points yet.</div>
     </div>
@@ -302,7 +307,8 @@
     <ol>
       <li><b>Load a video</b> of something moving across the frame (a rolling ball, a walking person, a car). It stays on your device — nothing is uploaded.</li>
       <li><b>Set the frame rate</b> (fps) to match your video so times are correct. Most phone video is 30 fps (slow-motion is often 120 or 240).</li>
-      <li><b>Calibrate the scale:</b> tap <b>Set scale</b>, then <b>double-tap</b> two points a known real distance apart (a metre stick, a floor tile) and type that distance in metres. Now pixels become metres. Optionally <b>Set origin</b> to choose where 0 m is.</li>
+      <li><b>Zoom for precision:</b> <b>pinch</b> the video (or use the 🔍 buttons) to zoom in while setting the scale or marking points, and <b>drag two fingers</b> to pan. Tap <b>⤢</b> to fit again. Points still land exactly where you double-tap.</li>
+      <li><b>Calibrate the scale:</b> tap <b>Set scale</b>, then <b>double-tap</b> two points a known real distance apart (a metre stick, a floor tile) and type that distance in metres. Now pixels become metres. Optionally <b>Set origin</b> to choose where 0 m is. Positions use the usual convention: <b>right = +x, up = +y</b>.</li>
       <li><b>Track the object:</b>
         <ul>
           <li><b>✋ Manual tap</b> — step through frames and <b>double-tap</b> the object each time (double-tap so pinch/scroll gestures don’t drop stray points). Best on a touchscreen and always reliable.</li>
@@ -393,6 +399,7 @@ function onMeta(){
   proc.width=pw; proc.height=ph;
   loaded=true;
   $('#dropMsg').style.display='none'; disp.style.display='block';
+  $('#zoomCtl').style.display='flex'; resetView();
   $('#fTot').textContent=totalFrames();
   ['firstBtn','prevBtn','playBtn','nextBtn','scrub','scaleBtn','originBtn','trackRunBtn','tzeroBtn'].forEach(id=>{ const el=$('#'+id); if(el) el.disabled=false; });
   timeZero=0; $('#tzeroBtn').textContent='⏱ Set t=0 here'; $('#tzeroResetBtn').style.display='none';
@@ -451,10 +458,27 @@ function stopPlay(){ playing=false; $('#playBtn').textContent='▶ play'; video.
 
 /* ---------- Coordinate mapping ---------- */
 function toImg(e){
-  const r=disp.getBoundingClientRect();
+  const r=disp.getBoundingClientRect();       // r reflects the current zoom/pan, so this stays correct while zoomed
   return { x: clamp((e.clientX-r.left)*(vw/r.width),0,vw),
            y: clamp((e.clientY-r.top )*(vh/r.height),0,vh) };
 }
+
+/* ---------- Zoom / pan (CSS transform on the canvas; overlays & toImg stay aligned) ---------- */
+let vz=1, vtx=0, vty=0;
+function applyView(){ const natW=disp.clientWidth||1, natH=disp.clientHeight||1;
+  if(vz<=1){ vz=1; vtx=0; vty=0; }
+  else { vtx=Math.min(0,Math.max(-(vz-1)*natW, vtx)); vty=Math.min(0,Math.max(-(vz-1)*natH, vty)); }
+  disp.style.transformOrigin='0 0';
+  disp.style.transform = vz===1 ? 'none' : `translate(${vtx}px,${vty}px) scale(${vz})`;
+  const rb=$('#zoomResetBtn'); if(rb) rb.style.opacity = vz>1?1:.5;
+}
+function resetView(){ vz=1; vtx=0; vty=0; applyView(); }
+function zoomAt(f,mx,my){ const r=disp.getBoundingClientRect();
+  const ox=(mx-r.left)/vz, oy=(my-r.top)/vz;                 // point under the fingers, in un-scaled canvas px
+  const z2=Math.max(1,Math.min(6, vz*f));
+  vtx = mx-(r.left-vtx)-z2*ox; vty = my-(r.top-vty)-z2*oy; vz=z2; applyView();   // keep that point fixed
+}
+function stageCenter(){ const r=stage.getBoundingClientRect(); return {x:r.left+r.width/2, y:r.top+r.height/2}; }
 
 /* ---------- Rendering (native-res canvas, CSS-scaled) ---------- */
 function render(){
@@ -620,22 +644,35 @@ function handlePlace(p){
   if(mode==='manual'){ const recFrame=curFrame(); pushUndo(recFrame); recordPoint(p);
     renderTracks(); renderLegend(); updateGraph(); gotoFrame(recFrame+1); return; }
 }
-let dispDown=null, lastTapT=0, lastTapXY=null, activePtrs=0;
+let dispDown=null, lastTapT=0, lastTapXY=null;
+const ptrs=new Map(); let pinch=null;                     // two-finger pinch-zoom / pan
+const twoPtrs=()=>[...ptrs.values()];
 disp.addEventListener('pointerdown', e=>{
   if(!loaded) return;
-  activePtrs++;
-  if(activePtrs>1){ dispDown=null; boxSel=null; lastTapT=0; render(); return; }   // 2nd finger (pinch): abort
+  ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(ptrs.size>=2){                                       // 2nd finger: start pinch/pan, cancel any placement/box
+    dispDown=null; boxSel=null; lastTapT=0;
+    const [a,b]=twoPtrs(); pinch={ dist:Math.hypot(a.x-b.x,a.y-b.y), mx:(a.x+b.x)/2, my:(a.y+b.y)/2 };
+    render(); return;
+  }
   dispDown={ cx:e.clientX, cy:e.clientY, img:toImg(e), moved:false, id:e.pointerId };
   try{ disp.setPointerCapture(e.pointerId); }catch(_){}
   if(mode==='auto' && pendingAction===null && cvReady){ const q=dispDown.img; boxSel={x0:q.x,y0:q.y,x1:q.x,y1:q.y}; }
 });
 disp.addEventListener('pointermove', e=>{
-  if(!dispDown || e.pointerId!==dispDown.id || activePtrs>1) return;
+  if(ptrs.has(e.pointerId)) ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(pinch && ptrs.size>=2){                              // pinch to zoom + drag two fingers to pan
+    const [a,b]=twoPtrs(); const dist=Math.hypot(a.x-b.x,a.y-b.y), mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
+    if(pinch.dist>0) zoomAt(dist/pinch.dist, mx, my);
+    vtx+=(mx-pinch.mx); vty+=(my-pinch.my); applyView();
+    pinch={dist,mx,my}; return;
+  }
+  if(!dispDown || e.pointerId!==dispDown.id) return;
   if(Math.hypot(e.clientX-dispDown.cx, e.clientY-dispDown.cy) > 6) dispDown.moved=true;
   if(boxSel){ const q=toImg(e); boxSel.x1=q.x; boxSel.y1=q.y; render(); }
 });
 disp.addEventListener('pointerup', e=>{
-  activePtrs=Math.max(0,activePtrs-1);
+  ptrs.delete(e.pointerId); if(ptrs.size<2) pinch=null;
   if(!dispDown || e.pointerId!==dispDown.id) return;
   const info=dispDown; dispDown=null;
   if(boxSel){                                    // Auto: finalize the tracking box
@@ -651,7 +688,11 @@ disp.addEventListener('pointerup', e=>{
   if(isDouble){ lastTapT=0; lastTapXY=null; handlePlace(info.img); }
   else { lastTapT=now; lastTapXY={x:info.cx,y:info.cy}; }
 });
-disp.addEventListener('pointercancel', ()=>{ activePtrs=Math.max(0,activePtrs-1); dispDown=null; boxSel=null; render(); });
+disp.addEventListener('pointercancel', e=>{ if(e) ptrs.delete(e.pointerId); if(ptrs.size<2) pinch=null; dispDown=null; boxSel=null; render(); });
+$('#zoomInBtn').onclick=()=>{ const c=stageCenter(); zoomAt(1.6,c.x,c.y); };
+$('#zoomOutBtn').onclick=()=>{ const c=stageCenter(); zoomAt(1/1.6,c.x,c.y); };
+$('#zoomResetBtn').onclick=resetView;
+window.addEventListener('resize',()=>{ if(loaded) applyView(); });
 
 /* ---------- OpenCV template tracking ---------- */
 const TS=41;
@@ -835,7 +876,8 @@ function seriesFor(tk, sel){                   // {t, v, frame} for a plot quant
   const s=sel||focusedPlot.sel, k=scaleMPP||1;
   const o=origin||(pts.length?pts[0]:{x:0,y:0});
   const t=pts.map(p=>p.t-timeZero);
-  const ux=pts.map(p=>(p.x-o.x)*k), uy=pts.map(p=>(p.y-o.y)*k);
+  // image y grows DOWNWARD; physics y should grow UPWARD, so flip it about the origin
+  const ux=pts.map(p=>(p.x-o.x)*k), uy=pts.map(p=>(o.y-p.y)*k);
   let val;
   if(s==='x') val=ux;
   else if(s==='y') val=uy;
@@ -1071,28 +1113,31 @@ function renderLegend(){ const c=$('#legend'); c.innerHTML='';
     c.appendChild(el); }); }
 function renderData(){
   const tk=tracks[activeTrack]; const tb=$('#dataBody'); tb.innerHTML='';
-  const s1=PLOTS[0].sel, s2=PLOTS[1].sel;
+  const s1=PLOTS[0].sel, s2=PLOTS[1].sel, u=unit(), pd=(u==='m'?3:1);
+  $('#xHead').textContent='x ('+u+')'; $('#yHead').textContent='y ('+u+')';
   $('#valHead1').textContent=plotShort(s1)+' ('+plotUnit(s1)+')';
   $('#valHead2').textContent=plotShort(s2)+' ('+plotUnit(s2)+')';
   const pts=(tk?tk.points:[]).slice().sort((a,b)=>a.frame-b.frame);
-  const m1={},m2={}; if(tk){ seriesFor(tk,s1).forEach(e=>m1[e.frame]=e.v); seriesFor(tk,s2).forEach(e=>m2[e.frame]=e.v); }
+  const m1={},m2={},mX={},mY={}; if(tk){ seriesFor(tk,s1).forEach(e=>m1[e.frame]=e.v); seriesFor(tk,s2).forEach(e=>m2[e.frame]=e.v);
+    seriesFor(tk,'x').forEach(e=>mX[e.frame]=e.v); seriesFor(tk,'y').forEach(e=>mY[e.frame]=e.v); }
   $('#emptyMsg').style.display=pts.length?'none':'block';
   pts.forEach(p=>{ const tr=document.createElement('tr');
     if(selected.has(p.frame)) tr.className='selrow';
     const v1=m1[p.frame], v2=m2[p.frame];
-    tr.innerHTML=`<td>${p.frame}</td><td>${(p.t-timeZero).toFixed(3)}</td><td>${p.x.toFixed(0)}</td><td>${p.y.toFixed(0)}</td><td>${(v1==null?0:v1).toFixed(3)}</td><td>${(v2==null?0:v2).toFixed(3)}</td>`;
+    tr.innerHTML=`<td>${p.frame}</td><td>${(p.t-timeZero).toFixed(3)}</td><td>${(mX[p.frame]||0).toFixed(pd)}</td><td>${(mY[p.frame]||0).toFixed(pd)}</td><td>${(v1==null?0:v1).toFixed(3)}</td><td>${(v2==null?0:v2).toFixed(3)}</td>`;
     tr.onclick=()=>{ toggleSel(p.frame); selectionChanged(); };
     tb.appendChild(tr); });
 }
 
 /* ---------- CSV ---------- */
 $('#exportBtn').onclick=()=>{
-  const s1=PLOTS[0].sel, s2=PLOTS[1].sel;
-  let rows=[['object','frame','time_s','x_px','y_px','g1_'+s1+'('+plotUnit(s1)+')','g2_'+s2+'('+plotUnit(s2)+')']];
-  tracks.forEach(tk=>{ const m1={},m2={}; seriesFor(tk,s1).forEach(e=>m1[e.frame]=e.v); seriesFor(tk,s2).forEach(e=>m2[e.frame]=e.v);
+  const s1=PLOTS[0].sel, s2=PLOTS[1].sel, u=unit();
+  let rows=[['object','frame','time_s','x_'+u,'y_'+u,'g1_'+s1+'('+plotUnit(s1)+')','g2_'+s2+'('+plotUnit(s2)+')']];
+  tracks.forEach(tk=>{ const m1={},m2={},mX={},mY={}; seriesFor(tk,s1).forEach(e=>m1[e.frame]=e.v); seriesFor(tk,s2).forEach(e=>m2[e.frame]=e.v);
+    seriesFor(tk,'x').forEach(e=>mX[e.frame]=e.v); seriesFor(tk,'y').forEach(e=>mY[e.frame]=e.v);
     tk.points.slice().sort((a,b)=>a.frame-b.frame).forEach(p=>{
       const v1=m1[p.frame], v2=m2[p.frame];
-      rows.push([tk.name,p.frame,(p.t-timeZero).toFixed(4),p.x.toFixed(1),p.y.toFixed(1),(v1==null?0:v1).toFixed(4),(v2==null?0:v2).toFixed(4)]); }); });
+      rows.push([tk.name,p.frame,(p.t-timeZero).toFixed(4),(mX[p.frame]||0).toFixed(4),(mY[p.frame]||0).toFixed(4),(v1==null?0:v1).toFixed(4),(v2==null?0:v2).toFixed(4)]); }); });
   if(rows.length<2){ status('No data to export yet.'); return; }
   const csv=rows.map(r=>r.join(',')).join('\n');
   const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
